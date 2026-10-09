@@ -13,6 +13,7 @@ class TaskTile extends StatelessWidget {
     required this.onDecrease,
     required this.onToggleDraft,
     this.reorderable = true,
+    this.allowDraft = true,
   });
 
   final TaskModel task;
@@ -31,6 +32,10 @@ class TaskTile extends StatelessWidget {
   /// Finished tasks are pinned to the bottom, so they have no drag handle.
   final bool reorderable;
 
+  /// When false (e.g. the Religion list) the task can't be moved to drafts:
+  /// the swipe-right action and the menu entry are removed.
+  final bool allowDraft;
+
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
@@ -46,9 +51,19 @@ class TaskTile extends StatelessWidget {
             ? 'Completed'
             : '${formatAmount(task.target - task.remaining)} of ${formatAmount(task.target)} done';
 
+    const deleteBackground = _SwipeBackground(
+      alignment: Alignment.centerRight,
+      color: Color(0xFFFFE8E8),
+      foreground: Color(0xFFD83B3B),
+      icon: Icons.delete_outline_rounded,
+      label: 'Delete',
+    );
+
     return Dismissible(
       key: ValueKey(task.id),
-      direction: DismissDirection.horizontal,
+      direction: allowDraft
+          ? DismissDirection.horizontal
+          : DismissDirection.endToStart,
       // Left -> right: move to drafts (or back to tasks). Right -> left: delete.
       confirmDismiss: (direction) async {
         if (direction == DismissDirection.startToEnd) {
@@ -58,20 +73,19 @@ class TaskTile extends StatelessWidget {
         }
         return false;
       },
-      background: _SwipeBackground(
-        alignment: Alignment.centerLeft,
-        color: colorScheme.primary.withValues(alpha: .10),
-        foreground: colorScheme.primary,
-        icon: task.isDraft ? Icons.publish_rounded : Icons.drafts_outlined,
-        label: task.isDraft ? 'Move to tasks' : 'Move to drafts',
-      ),
-      secondaryBackground: const _SwipeBackground(
-        alignment: Alignment.centerRight,
-        color: Color(0xFFFFE8E8),
-        foreground: Color(0xFFD83B3B),
-        icon: Icons.delete_outline_rounded,
-        label: 'Delete',
-      ),
+      // Dismissible requires a background whenever secondaryBackground is set.
+      background: allowDraft
+          ? _SwipeBackground(
+              alignment: Alignment.centerLeft,
+              color: colorScheme.primary.withValues(alpha: .10),
+              foreground: colorScheme.primary,
+              icon: task.isDraft
+                  ? Icons.publish_rounded
+                  : Icons.drafts_outlined,
+              label: task.isDraft ? 'Move to tasks' : 'Move to drafts',
+            )
+          : deleteBackground,
+      secondaryBackground: deleteBackground,
       child: Card(
         child: InkWell(
           borderRadius: BorderRadius.circular(20),
@@ -172,17 +186,19 @@ class TaskTile extends StatelessWidget {
                             title: Text('Edit task'),
                           ),
                         ),
-                        PopupMenuItem(
-                          value: 'draft',
-                          child: ListTile(
-                            contentPadding: EdgeInsets.zero,
-                            leading: Icon(task.isDraft
-                                ? Icons.publish_rounded
-                                : Icons.drafts_outlined),
-                            title: Text(
-                                task.isDraft ? 'Move to tasks' : 'Move to drafts'),
+                        if (allowDraft)
+                          PopupMenuItem(
+                            value: 'draft',
+                            child: ListTile(
+                              contentPadding: EdgeInsets.zero,
+                              leading: Icon(task.isDraft
+                                  ? Icons.publish_rounded
+                                  : Icons.drafts_outlined),
+                              title: Text(task.isDraft
+                                  ? 'Move to tasks'
+                                  : 'Move to drafts'),
+                            ),
                           ),
-                        ),
                         const PopupMenuItem(
                           value: 'delete',
                           child: ListTile(

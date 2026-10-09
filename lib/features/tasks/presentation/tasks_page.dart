@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../../../core/storage/task_storage.dart';
 import 'task_controller.dart';
 import 'task_tile.dart';
 import '../data/task_model.dart';
@@ -12,22 +13,44 @@ class TasksPage extends StatefulWidget {
 }
 
 class _TasksPageState extends State<TasksPage> {
+  static const _tabTasks = 0;
+  static const _tabDrafts = 1;
+  static const _tabReligion = 2;
+
+  /// Tasks + Drafts share this controller (same stored list).
   late final TaskController _controller;
-  int _tab = 0; // 0 = Tasks, 1 = Drafts
+
+  /// Completely independent list: own storage key, own progress, no drafts.
+  late final TaskController _religion;
+
+  int _tab = _tabTasks;
+
+  bool get _isReligion => _tab == _tabReligion;
+
+  /// The controller that the current tab reads from and writes to.
+  TaskController get _current => _isReligion ? _religion : _controller;
 
   @override
   void initState() {
     super.initState();
     _controller = TaskController()..load();
+    _religion = TaskController(
+      storage: const TaskStorage(key: 'religion_tasks'),
+    )..load();
   }
 
   @override
   void dispose() {
     _controller.dispose();
+    _religion.dispose();
     super.dispose();
   }
 
   Future<void> _openTaskSheet({TaskModel? task, bool startAsDraft = false}) async {
+    // Capture now: the tab could change while the sheet is open.
+    final controller = _current;
+    final allowDraft = !_isReligion;
+
     final titleController = TextEditingController(text: task?.title ?? '');
     final targetController = TextEditingController(
       text: formatAmount(task?.target ?? 1),
@@ -46,7 +69,8 @@ class _TasksPageState extends State<TasksPage> {
       builder: (sheetContext) {
         return _TaskFormSheet(
           isEditing: task != null,
-          initialDraft: task?.isDraft ?? startAsDraft,
+          allowDraft: allowDraft,
+          initialDraft: allowDraft && (task?.isDraft ?? startAsDraft),
           titleController: titleController,
           targetController: targetController,
           remainingController: remainingController,
@@ -61,14 +85,14 @@ class _TasksPageState extends State<TasksPage> {
     if (!mounted || result == null) return;
 
     if (task == null) {
-      await _controller.addTask(
+      await controller.addTask(
         result.title,
         result.target,
         result.remaining,
         isDraft: result.isDraft,
       );
     } else {
-      await _controller.updateTask(
+      await controller.updateTask(
         task.id,
         title: result.title,
         target: result.target,
@@ -78,8 +102,8 @@ class _TasksPageState extends State<TasksPage> {
     }
   }
 
-  Future<void> _deleteTask(TaskModel task) async {
-    await _controller.deleteTask(task.id);
+  Future<void> _deleteTask(TaskController controller, TaskModel task) async {
+    await controller.deleteTask(task.id);
     if (!mounted) return;
 
     ScaffoldMessenger.of(context).hideCurrentSnackBar();
@@ -88,7 +112,7 @@ class _TasksPageState extends State<TasksPage> {
         content: Text('"${task.title}" deleted'),
         action: SnackBarAction(
           label: 'UNDO',
-          onPressed: () => _controller.restoreTask(task),
+          onPressed: () => controller.restoreTask(task),
         ),
         behavior: SnackBarBehavior.floating,
         margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
@@ -118,12 +142,15 @@ class _TasksPageState extends State<TasksPage> {
   }
 
   Future<void> _confirmReset() async {
-    if (_controller.totalCount == 0) return;
+    final controller = _current;
+    if (controller.totalCount == 0) return;
 
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Reset all progress?'),
+        title: Text(_isReligion
+            ? 'Reset all religion progress?'
+            : 'Reset all progress?'),
         content: const Text(
           'Every task will return to its original amount. Your task names and targets will stay unchanged.',
         ),
@@ -140,10 +167,16 @@ class _TasksPageState extends State<TasksPage> {
       ),
     );
 
-    if (confirmed == true) await _controller.resetAll();
+    if (confirmed == true) await controller.resetAll();
   }
 
-  Widget _buildItem(TaskModel task, int index, {bool reorderable = true}) {
+  Widget _buildItem(
+    TaskController controller,
+    TaskModel task,
+    int index, {
+    bool reorderable = true,
+    bool allowDraft = true,
+  }) {
     return Padding(
       key: ValueKey('item_${task.id}'),
       padding: const EdgeInsets.only(bottom: 10),
@@ -151,15 +184,16 @@ class _TasksPageState extends State<TasksPage> {
         task: task,
         index: index,
         reorderable: reorderable,
-        onToggle: () => _controller.toggleTask(task.id),
+        allowDraft: allowDraft,
+        onToggle: () => controller.toggleTask(task.id),
         onEdit: () => _openTaskSheet(task: task),
-        onDelete: () => _deleteTask(task),
+        onDelete: () => _deleteTask(controller, task),
         onToggleDraft: () => _toggleDraft(task),
-        onIncrease: () => _controller.setRemaining(
+        onIncrease: () => controller.setRemaining(
           task.id,
           task.remaining + kAmountStep,
         ),
-        onDecrease: () => _controller.setRemaining(
+        onDecrease: () => controller.setRemaining(
           task.id,
           task.remaining - kAmountStep,
         ),
@@ -182,12 +216,17 @@ class _TasksPageState extends State<TasksPage> {
   }
 
   List<Widget> _buildSlivers() {
-    final pending = _controller.pendingTasks;
-    final completedTasks = _controller.completedTasks;
+    final current = _current;
+    final allowDraft = !_isReligion;
+
+    final pending = current.pendingTasks;
+    final completedTasks = current.completedTasks;
     final drafts = _controller.draftTasks;
     final completed = completedTasks.length;
-    final activeTotal = _controller.activeCount;
+    final activeTotal = current.activeCount;
     final progress = activeTotal == 0 ? 0.0 : completed / activeTotal;
+
+    final showEmptyState = _tab != _tabDrafts && current.totalCount == 0;
 
     return [
       SliverToBoxAdapter(
@@ -202,17 +241,26 @@ class _TasksPageState extends State<TasksPage> {
           padding: const EdgeInsets.only(top: 16, bottom: 14),
           child: _TabSwitcher(
             index: _tab,
-            taskCount: activeTotal,
-            draftCount: drafts.length,
+            tabs: [
+              _TabData('Tasks', Icons.checklist_rounded,
+                  _controller.activeCount),
+              _TabData('Drafts', Icons.drafts_outlined, drafts.length),
+              _TabData('Religion', Icons.auto_stories_rounded,
+                  _religion.activeCount),
+            ],
             onChanged: (i) => setState(() => _tab = i),
           ),
         ),
       ),
-      if (_tab == 0) ...[
+      if (showEmptyState)
+        const SliverToBoxAdapter(child: _EmptyState())
+      else if (_tab != _tabDrafts) ...[
         if (activeTotal == 0)
-          const SliverToBoxAdapter(
+          SliverToBoxAdapter(
             child: _InlineHint(
-              text: 'No active tasks. Create one or move a draft here.',
+              text: _isReligion
+                  ? 'No religion tasks yet. Create one to get started.'
+                  : 'No active tasks. Create one or move a draft here.',
             ),
           ),
         if (pending.length > 1)
@@ -225,8 +273,9 @@ class _TasksPageState extends State<TasksPage> {
           SliverReorderableList(
             itemCount: pending.length,
             proxyDecorator: _proxyDecorator,
-            onReorder: _controller.reorderPending,
-            itemBuilder: (_, i) => _buildItem(pending[i], i),
+            onReorder: current.reorderPending,
+            itemBuilder: (_, i) =>
+                _buildItem(current, pending[i], i, allowDraft: allowDraft),
           ),
         if (completedTasks.isNotEmpty) ...[
           SliverToBoxAdapter(
@@ -234,7 +283,13 @@ class _TasksPageState extends State<TasksPage> {
           ),
           SliverList(
             delegate: SliverChildBuilderDelegate(
-              (_, i) => _buildItem(completedTasks[i], i, reorderable: false),
+              (_, i) => _buildItem(
+                current,
+                completedTasks[i],
+                i,
+                reorderable: false,
+                allowDraft: allowDraft,
+              ),
               childCount: completedTasks.length,
             ),
           ),
@@ -257,7 +312,7 @@ class _TasksPageState extends State<TasksPage> {
             itemCount: drafts.length,
             proxyDecorator: _proxyDecorator,
             onReorder: _controller.reorderDrafts,
-            itemBuilder: (_, i) => _buildItem(drafts[i], i),
+            itemBuilder: (_, i) => _buildItem(_controller, drafts[i], i),
           ),
         ],
       ],
@@ -267,8 +322,10 @@ class _TasksPageState extends State<TasksPage> {
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: _controller,
+      animation: Listenable.merge([_controller, _religion]),
       builder: (context, _) {
+        final isLoading = _controller.isLoading || _religion.isLoading;
+
         return Scaffold(
           appBar: AppBar(
             toolbarHeight: 70,
@@ -290,33 +347,32 @@ class _TasksPageState extends State<TasksPage> {
             actions: [
               IconButton(
                 tooltip: 'Reset progress',
-                onPressed: _controller.totalCount == 0 ? null : _confirmReset,
+                onPressed: _current.totalCount == 0 ? null : _confirmReset,
                 icon: const Icon(Icons.restart_alt_rounded),
               ),
               const SizedBox(width: 8),
             ],
           ),
-          body: _controller.isLoading
+          body: isLoading
               ? const Center(child: CircularProgressIndicator())
-              : _controller.totalCount == 0
-                  ? const _EmptyState()
-                  : RefreshIndicator(
-                      onRefresh: _controller.load,
-                      child: CustomScrollView(
-                        physics: const AlwaysScrollableScrollPhysics(),
-                        slivers: [
-                          SliverPadding(
-                            padding: const EdgeInsets.fromLTRB(16, 8, 16, 110),
-                            sliver: SliverMainAxisGroup(slivers: _buildSlivers()),
-                          ),
-                        ],
+              : RefreshIndicator(
+                  onRefresh: () =>
+                      Future.wait([_controller.load(), _religion.load()]),
+                  child: CustomScrollView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    slivers: [
+                      SliverPadding(
+                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 110),
+                        sliver: SliverMainAxisGroup(slivers: _buildSlivers()),
                       ),
-                    ),
+                    ],
+                  ),
+                ),
           floatingActionButton: FloatingActionButton.extended(
-            onPressed: () => _openTaskSheet(startAsDraft: _tab == 1),
+            onPressed: () => _openTaskSheet(startAsDraft: _tab == _tabDrafts),
             icon: const Icon(Icons.add_rounded),
             label: Text(
-              _tab == 1 ? 'New draft' : 'New task',
+              _tab == _tabDrafts ? 'New draft' : 'New task',
               style: const TextStyle(fontWeight: FontWeight.w700),
             ),
           ),
@@ -326,17 +382,23 @@ class _TasksPageState extends State<TasksPage> {
   }
 }
 
+class _TabData {
+  const _TabData(this.label, this.icon, this.count);
+
+  final String label;
+  final IconData icon;
+  final int count;
+}
+
 class _TabSwitcher extends StatelessWidget {
   const _TabSwitcher({
     required this.index,
-    required this.taskCount,
-    required this.draftCount,
+    required this.tabs,
     required this.onChanged,
   });
 
   final int index;
-  final int taskCount;
-  final int draftCount;
+  final List<_TabData> tabs;
   final ValueChanged<int> onChanged;
 
   @override
@@ -349,20 +411,14 @@ class _TabSwitcher extends StatelessWidget {
       ),
       child: Row(
         children: [
-          _TabItem(
-            label: 'Tasks',
-            icon: Icons.checklist_rounded,
-            count: taskCount,
-            selected: index == 0,
-            onTap: () => onChanged(0),
-          ),
-          _TabItem(
-            label: 'Drafts',
-            icon: Icons.drafts_outlined,
-            count: draftCount,
-            selected: index == 1,
-            onTap: () => onChanged(1),
-          ),
+          for (var i = 0; i < tabs.length; i++)
+            _TabItem(
+              label: tabs[i].label,
+              icon: tabs[i].icon,
+              count: tabs[i].count,
+              selected: index == i,
+              onTap: () => onChanged(i),
+            ),
         ],
       ),
     );
@@ -400,7 +456,7 @@ class _TabItem extends StatelessWidget {
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 180),
             curve: Curves.easeOut,
-            padding: const EdgeInsets.symmetric(vertical: 11),
+            padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 4),
             decoration: BoxDecoration(
               color: selected ? Colors.white : Colors.transparent,
               borderRadius: BorderRadius.circular(12),
@@ -414,37 +470,41 @@ class _TabItem extends StatelessWidget {
                     ]
                   : null,
             ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(icon, size: 18, color: fg),
-                const SizedBox(width: 6),
-                Text(
-                  label,
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700,
-                    color: fg,
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
-                  decoration: BoxDecoration(
-                    color: fg.withValues(alpha: .12),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Text(
-                    '$count',
+            // Scales down on narrow screens so three tabs always fit.
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(icon, size: 18, color: fg),
+                  const SizedBox(width: 6),
+                  Text(
+                    label,
                     style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w800,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
                       color: fg,
                     ),
                   ),
-                ),
-              ],
+                  const SizedBox(width: 6),
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: fg.withValues(alpha: .12),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      '$count',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                        color: fg,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -639,7 +699,7 @@ class _EmptyState extends StatelessWidget {
 
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(36),
+        padding: const EdgeInsets.fromLTRB(36, 48, 36, 36),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -687,6 +747,7 @@ class _TaskFormResult {
 class _TaskFormSheet extends StatefulWidget {
   const _TaskFormSheet({
     required this.isEditing,
+    required this.allowDraft,
     required this.initialDraft,
     required this.titleController,
     required this.targetController,
@@ -694,6 +755,9 @@ class _TaskFormSheet extends StatefulWidget {
   });
 
   final bool isEditing;
+
+  /// False for the Religion list: hides the "Save as draft" switch.
+  final bool allowDraft;
   final bool initialDraft;
   final TextEditingController titleController;
   final TextEditingController targetController;
@@ -705,7 +769,7 @@ class _TaskFormSheet extends StatefulWidget {
 
 class _TaskFormSheetState extends State<_TaskFormSheet> {
   String? _error;
-  late bool _isDraft = widget.initialDraft;
+  late bool _isDraft = widget.allowDraft && widget.initialDraft;
 
   /// Accepts "1.5" and "1,5" (some keyboards use a comma).
   double? _parseAmount(String text) =>
@@ -748,7 +812,7 @@ class _TaskFormSheetState extends State<_TaskFormSheet> {
         title: title,
         target: target,
         remaining: remaining,
-        isDraft: _isDraft,
+        isDraft: widget.allowDraft && _isDraft,
       ),
     );
   }
@@ -825,19 +889,20 @@ class _TaskFormSheetState extends State<_TaskFormSheet> {
               ],
             ),
             const SizedBox(height: 8),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              value: _isDraft,
-              onChanged: (v) => setState(() => _isDraft = v),
-              title: const Text(
-                'Save as draft',
-                style: TextStyle(fontWeight: FontWeight.w600),
+            if (widget.allowDraft)
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                value: _isDraft,
+                onChanged: (v) => setState(() => _isDraft = v),
+                title: const Text(
+                  'Save as draft',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+                subtitle: const Text(
+                  'Drafts stay out of your progress until you move them to tasks.',
+                  style: TextStyle(fontSize: 12),
+                ),
               ),
-              subtitle: const Text(
-                'Drafts stay out of your progress until you move them to tasks.',
-                style: TextStyle(fontSize: 12),
-              ),
-            ),
             if (_error != null) ...[
               const SizedBox(height: 4),
               Text(
