@@ -1,0 +1,8 @@
+under today's progress make 2 tabs one for the tasks and one for the draft 
+
+and make when the user slide the task from left to right it goes to draft and (from right to left delete it (it is alreday does that so keep it as it is))
+
+when a task is done make it automaticlly goes to the bottom even if it was on the top(even if it was high priority if it is done it goes at the bottom of the tasks)
+but keep their arrangement the same so when the user reset the tasks it gets back to its previous priority
+
+solve this as a senior and send the code updated
