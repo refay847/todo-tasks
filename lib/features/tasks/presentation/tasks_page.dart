@@ -1,9 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import '../../../core/storage/task_storage.dart';
+import '../data/task_model.dart';
 import 'task_controller.dart';
 import 'task_tile.dart';
-import '../data/task_model.dart';
 
 class TasksPage extends StatefulWidget {
   const TasksPage({super.key});
@@ -12,50 +11,63 @@ class TasksPage extends StatefulWidget {
   State<TasksPage> createState() => _TasksPageState();
 }
 
-class _TasksPageState extends State<TasksPage> {
-  static const _tabTasks = 0;
-  static const _tabDrafts = 1;
-  static const _tabReligion = 2;
-
-  /// Tasks + Drafts share this controller (same stored list).
+class _TasksPageState extends State<TasksPage>
+    with SingleTickerProviderStateMixin {
   late final TaskController _controller;
+  late final TabController _tabController;
 
-  /// Completely independent list: own storage key, own progress, no drafts.
-  late final TaskController _religion;
-
-  int _tab = _tabTasks;
-
-  bool get _isReligion => _tab == _tabReligion;
-
-  /// The controller that the current tab reads from and writes to.
-  TaskController get _current => _isReligion ? _religion : _controller;
+  TaskCategory get _currentCategory =>
+      TaskCategory.values[_tabController.index];
 
   @override
   void initState() {
     super.initState();
     _controller = TaskController()..load();
-    _religion = TaskController(
-      storage: const TaskStorage(key: 'religion_tasks'),
-    )..load();
+    _tabController = TabController(
+      length: TaskCategory.values.length,
+      vsync: this,
+    )..addListener(() {
+        if (!_tabController.indexIsChanging) {
+          setState(() {});
+        }
+      });
   }
 
   @override
   void dispose() {
+    _tabController.dispose();
     _controller.dispose();
-    _religion.dispose();
     super.dispose();
   }
 
-  Future<void> _openTaskSheet({TaskModel? task, bool startAsDraft = false}) async {
-    // Capture now: the tab could change while the sheet is open.
-    final controller = _current;
-    final allowDraft = !_isReligion;
+  void _showSnack(String message, {SnackBarAction? action}) {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(message),
+        action: action,
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      ),
+    );
+  }
+
+  Future<void> _openTaskSheet({TaskModel? task}) async {
+    final isEditing = task != null;
+    final openedFromDraft = !isEditing && _currentCategory.isDraft;
+
+    // Draft is not a real home category, so new tasks default to Work.
+    final initialCategory = isEditing
+        ? task.category
+        : (openedFromDraft ? TaskCategory.work : _currentCategory);
 
     final titleController = TextEditingController(text: task?.title ?? '');
     final targetController = TextEditingController(
       text: formatAmount(task?.target ?? 1),
     );
-    // New tasks start with all the work remaining.
     final remainingController = TextEditingController(
       text: formatAmount(task?.remaining ?? 1),
     );
@@ -64,18 +76,15 @@ class _TasksPageState extends State<TasksPage> {
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      backgroundColor: Colors.white,
       showDragHandle: true,
-      builder: (sheetContext) {
-        return _TaskFormSheet(
-          isEditing: task != null,
-          allowDraft: allowDraft,
-          initialDraft: allowDraft && (task?.isDraft ?? startAsDraft),
-          titleController: titleController,
-          targetController: targetController,
-          remainingController: remainingController,
-        );
-      },
+      builder: (_) => _TaskFormSheet(
+        isEditing: isEditing,
+        openedFromDraft: openedFromDraft,
+        initialCategory: initialCategory,
+        titleController: titleController,
+        targetController: targetController,
+        remainingController: remainingController,
+      ),
     );
 
     titleController.dispose();
@@ -84,119 +93,300 @@ class _TasksPageState extends State<TasksPage> {
 
     if (!mounted || result == null) return;
 
-    if (task == null) {
-      await controller.addTask(
-        result.title,
-        result.target,
-        result.remaining,
-        isDraft: result.isDraft,
-      );
-    } else {
-      await controller.updateTask(
+    if (isEditing) {
+      await _controller.updateTask(
         task.id,
         title: result.title,
         target: result.target,
         remaining: result.remaining,
-        isDraft: result.isDraft,
+        category: result.category,
+      );
+    } else {
+      await _controller.addTask(
+        title: result.title,
+        target: result.target,
+        remaining: result.remaining,
+        category: result.category,
+      );
+      // If added while viewing Draft (or to another tab), jump to that tab.
+      if (result.category != _currentCategory) {
+        _tabController.animateTo(result.category.index);
+        _showSnack('Added to ${result.category.label}');
+      }
+    }
+  }
+
+  Future<bool> _confirmDeleteDialog(TaskModel task) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delete this task?'),
+        content: Text('"${task.title}" will be removed.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(dialogContext).colorScheme.error,
+              foregroundColor: Theme.of(dialogContext).colorScheme.onError,
+            ),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    return confirmed ?? false;
+  }
+
+  Future<void> _performDelete(TaskModel task) async {
+    final deleted = await _controller.deleteTask(task.id);
+    if (deleted == null) return;
+
+    _showSnack(
+      '"${deleted.task.title}" deleted',
+      action: SnackBarAction(
+        label: 'UNDO',
+        onPressed: () => _controller.insertTaskAt(deleted.task, deleted.index),
+      ),
+    );
+  }
+
+  Future<void> _handleDraftOrRestore(TaskModel task) async {
+    if (task.isDraft) {
+      final restoredTo = await _controller.restoreFromDraft(task.id);
+      if (restoredTo != null) {
+        _showSnack(
+          'Restored to ${restoredTo.label}',
+          action: SnackBarAction(
+            label: 'UNDO',
+            onPressed: () => _controller.sendToDraft(task.id),
+          ),
+        );
+      }
+    } else {
+      final previous = task.category;
+      await _controller.sendToDraft(task.id);
+      _showSnack(
+        'Sent to Draft',
+        action: SnackBarAction(
+          label: 'UNDO',
+          onPressed: () => _controller.moveTask(task.id, previous),
+        ),
       );
     }
   }
 
-  Future<void> _deleteTask(TaskController controller, TaskModel task) async {
-    await controller.deleteTask(task.id);
-    if (!mounted) return;
+  Future<void> _openMoveSheet(TaskModel task) async {
+    final chosen = await showModalBottomSheet<TaskCategory>(
+      context: context,
+      showDragHandle: true,
+      useSafeArea: true,
+      builder: (_) => _MoveCategorySheet(currentCategory: task.category),
+    );
 
-    ScaffoldMessenger.of(context).hideCurrentSnackBar();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('"${task.title}" deleted'),
-        action: SnackBarAction(
-          label: 'UNDO',
-          onPressed: () => controller.restoreTask(task),
-        ),
-        behavior: SnackBarBehavior.floating,
-        margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+    if (!mounted || chosen == null || chosen == task.category) return;
+
+    final previous = task.category;
+    await _controller.moveTask(task.id, chosen);
+    _showSnack(
+      'Moved to ${chosen.label}',
+      action: SnackBarAction(
+        label: 'UNDO',
+        onPressed: () => _controller.moveTask(task.id, previous),
       ),
     );
   }
 
-  Future<void> _toggleDraft(TaskModel task) async {
-    final toDraft = !task.isDraft;
-    await _controller.setDraft(task.id, toDraft);
-    if (!mounted) return;
-
-    ScaffoldMessenger.of(context).hideCurrentSnackBar();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(toDraft ? 'Moved to drafts' : 'Moved to tasks'),
-        action: SnackBarAction(
-          label: 'UNDO',
-          onPressed: () => _controller.setDraft(task.id, task.isDraft),
-        ),
-        behavior: SnackBarBehavior.floating,
-        margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-      ),
-    );
-  }
-
-  Future<void> _confirmReset() async {
-    final controller = _current;
-    if (controller.totalCount == 0) return;
+  Future<void> _confirmResetCategory() async {
+    final category = _currentCategory;
+    if (_controller.countFor(category) == 0) return;
 
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text(_isReligion
-            ? 'Reset all religion progress?'
-            : 'Reset all progress?'),
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Reset ${category.label} progress?'),
         content: const Text(
-          'Every task will return to its original amount. Your task names and targets will stay unchanged.',
+          'Every task in this tab will return to its full target amount.',
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context, false),
+            onPressed: () => Navigator.pop(dialogContext, false),
             child: const Text('Cancel'),
           ),
           FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Reset progress'),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Reset'),
           ),
         ],
       ),
     );
 
-    if (confirmed == true) await controller.resetAll();
+    if (confirmed == true) {
+      await _controller.resetCategory(category);
+    }
   }
 
-  Widget _buildItem(
-    TaskController controller,
-    TaskModel task,
-    int index, {
-    bool reorderable = true,
-    bool allowDraft = true,
-  }) {
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) {
+        final currentCount = _controller.countFor(_currentCategory);
+
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text(
+              'Focus Tasks',
+              style: TextStyle(fontWeight: FontWeight.w800),
+            ),
+            actions: [
+              IconButton(
+                tooltip: 'Reset ${_currentCategory.label} progress',
+                onPressed: currentCount == 0 ? null : _confirmResetCategory,
+                icon: const Icon(Icons.restart_alt_rounded),
+              ),
+              const SizedBox(width: 4),
+            ],
+            bottom: TabBar(
+              controller: _tabController,
+              isScrollable: true,
+              tabAlignment: TabAlignment.start,
+              indicatorWeight: 3,
+              dividerHeight: 1,
+              tabs: [
+                for (final category in TaskCategory.values)
+                  _CategoryTab(
+                    category: category,
+                    count: _controller.countFor(category),
+                    selected: _currentCategory == category,
+                  ),
+              ],
+            ),
+          ),
+          body: _controller.isLoading
+              ? const Center(child: CircularProgressIndicator())
+              : TabBarView(
+                  controller: _tabController,
+                  children: [
+                    for (final category in TaskCategory.values)
+                      _CategoryTaskList(
+                        category: category,
+                        controller: _controller,
+                        onEdit: (task) => _openTaskSheet(task: task),
+                        onMove: _openMoveSheet,
+                        onDraftOrRestore: _handleDraftOrRestore,
+                        onConfirmDelete: _confirmDeleteDialog,
+                        onDeleteConfirmed: _performDelete,
+                      ),
+                  ],
+                ),
+          floatingActionButton: FloatingActionButton.extended(
+            onPressed: () => _openTaskSheet(),
+            backgroundColor: _currentCategory.color,
+            foregroundColor: Colors.white,
+            icon: const Icon(Icons.add_rounded),
+            label: const Text(
+              'Add task',
+              style: TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _CategoryTab extends StatelessWidget {
+  const _CategoryTab({
+    required this.category,
+    required this.count,
+    required this.selected,
+  });
+
+  final TaskCategory category;
+  final int count;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final fg = selected ? category.color : colorScheme.onSurfaceVariant;
+
+    return Tab(
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(category.icon, size: 18, color: fg),
+          const SizedBox(width: 6),
+          Text(
+            category.label,
+            style: TextStyle(
+              fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+              color: fg,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
+            decoration: BoxDecoration(
+              color: fg.withValues(alpha: selected ? 0.16 : 0.10),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Text(
+              '$count',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w800,
+                color: fg,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CategoryTaskList extends StatelessWidget {
+  const _CategoryTaskList({
+    required this.category,
+    required this.controller,
+    required this.onEdit,
+    required this.onMove,
+    required this.onDraftOrRestore,
+    required this.onConfirmDelete,
+    required this.onDeleteConfirmed,
+  });
+
+  final TaskCategory category;
+  final TaskController controller;
+  final ValueChanged<TaskModel> onEdit;
+  final ValueChanged<TaskModel> onMove;
+  final ValueChanged<TaskModel> onDraftOrRestore;
+  final Future<bool> Function(TaskModel) onConfirmDelete;
+  final ValueChanged<TaskModel> onDeleteConfirmed;
+
+  Widget _buildTile(TaskModel task, int index, {required bool reorderable}) {
     return Padding(
-      key: ValueKey('item_${task.id}'),
+      key: ValueKey('task_${task.id}'),
       padding: const EdgeInsets.only(bottom: 10),
       child: TaskTile(
         task: task,
         index: index,
         reorderable: reorderable,
-        allowDraft: allowDraft,
         onToggle: () => controller.toggleTask(task.id),
-        onEdit: () => _openTaskSheet(task: task),
-        onDelete: () => _deleteTask(controller, task),
-        onToggleDraft: () => _toggleDraft(task),
-        onIncrease: () => controller.setRemaining(
-          task.id,
-          task.remaining + kAmountStep,
-        ),
-        onDecrease: () => controller.setRemaining(
-          task.id,
-          task.remaining - kAmountStep,
-        ),
+        onEdit: () => onEdit(task),
+        onMove: () => onMove(task),
+        onDraftOrRestore: () => onDraftOrRestore(task),
+        onConfirmDelete: () => onConfirmDelete(task),
+        onDeleteConfirmed: () => onDeleteConfirmed(task),
+        onIncrease: () =>
+            controller.setRemaining(task.id, task.remaining + kAmountStep),
+        onDecrease: () =>
+            controller.setRemaining(task.id, task.remaining - kAmountStep),
       ),
     );
   }
@@ -206,307 +396,262 @@ class _TasksPageState extends State<TasksPage> {
       animation: animation,
       builder: (context, child) => Material(
         color: Colors.transparent,
-        elevation: Curves.easeOut.transform(animation.value) * 8,
-        shadowColor: Colors.black26,
-        borderRadius: BorderRadius.circular(20),
+        elevation: Curves.easeOut.transform(animation.value) * 6,
+        borderRadius: BorderRadius.circular(18),
         child: child,
       ),
       child: child,
     );
   }
 
-  List<Widget> _buildSlivers() {
-    final current = _current;
-    final allowDraft = !_isReligion;
-
-    final pending = current.pendingTasks;
-    final completedTasks = current.completedTasks;
-    final drafts = _controller.draftTasks;
-    final completed = completedTasks.length;
-    final activeTotal = current.activeCount;
-    final progress = activeTotal == 0 ? 0.0 : completed / activeTotal;
-
-    final showEmptyState = _tab != _tabDrafts && current.totalCount == 0;
-
-    return [
-      SliverToBoxAdapter(
-        child: _ProgressHeader(
-          completed: completed,
-          total: activeTotal,
-          progress: progress,
-        ),
-      ),
-      SliverToBoxAdapter(
-        child: Padding(
-          padding: const EdgeInsets.only(top: 16, bottom: 14),
-          child: _TabSwitcher(
-            index: _tab,
-            tabs: [
-              _TabData('Tasks', Icons.checklist_rounded,
-                  _controller.activeCount),
-              _TabData('Drafts', Icons.drafts_outlined, drafts.length),
-              _TabData('Religion', Icons.auto_stories_rounded,
-                  _religion.activeCount),
-            ],
-            onChanged: (i) => setState(() => _tab = i),
-          ),
-        ),
-      ),
-      if (showEmptyState)
-        const SliverToBoxAdapter(child: _EmptyState())
-      else if (_tab != _tabDrafts) ...[
-        if (activeTotal == 0)
-          SliverToBoxAdapter(
-            child: _InlineHint(
-              text: _isReligion
-                  ? 'No religion tasks yet. Create one to get started.'
-                  : 'No active tasks. Create one or move a draft here.',
-            ),
-          ),
-        if (pending.length > 1)
-          const SliverToBoxAdapter(
-            child: _HintLine(
-              'Drag the handle to set priority. Top = most important.',
-            ),
-          ),
-        if (pending.isNotEmpty)
-          SliverReorderableList(
-            itemCount: pending.length,
-            proxyDecorator: _proxyDecorator,
-            onReorder: current.reorderPending,
-            itemBuilder: (_, i) =>
-                _buildItem(current, pending[i], i, allowDraft: allowDraft),
-          ),
-        if (completedTasks.isNotEmpty) ...[
-          SliverToBoxAdapter(
-            child: _SectionLabel(title: 'COMPLETED', count: completed),
-          ),
-          SliverList(
-            delegate: SliverChildBuilderDelegate(
-              (_, i) => _buildItem(
-                current,
-                completedTasks[i],
-                i,
-                reorderable: false,
-                allowDraft: allowDraft,
-              ),
-              childCount: completedTasks.length,
-            ),
-          ),
-        ],
-      ] else ...[
-        if (drafts.isEmpty)
-          const SliverToBoxAdapter(
-            child: _InlineHint(
-              text:
-                  'No drafts yet.\nSwipe a task to the right to save it as a draft.',
-            ),
-          )
-        else ...[
-          const SliverToBoxAdapter(
-            child: _HintLine(
-              'Drafts are not counted in your progress. Swipe right to move one to your tasks.',
-            ),
-          ),
-          SliverReorderableList(
-            itemCount: drafts.length,
-            proxyDecorator: _proxyDecorator,
-            onReorder: _controller.reorderDrafts,
-            itemBuilder: (_, i) => _buildItem(_controller, drafts[i], i),
-          ),
-        ],
-      ],
-    ];
-  }
-
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: Listenable.merge([_controller, _religion]),
-      builder: (context, _) {
-        final isLoading = _controller.isLoading || _religion.isLoading;
+    final all = controller.tasksFor(category);
+    final pending = controller.pendingTasksFor(category);
+    final completed = controller.completedTasksFor(category);
 
-        return Scaffold(
-          appBar: AppBar(
-            toolbarHeight: 70,
-            titleSpacing: 20,
-            title: const Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Focus Tasks',
-                  style: TextStyle(fontSize: 23, fontWeight: FontWeight.w800),
+    return Center(
+      child: ConstrainedBox(
+        // Keeps layout comfortable on tablets and wide screens.
+        constraints: const BoxConstraints(maxWidth: 720),
+        child: RefreshIndicator(
+          onRefresh: controller.load,
+          child: CustomScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            slivers: [
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 108),
+                sliver: SliverMainAxisGroup(
+                  slivers: [
+                    if (all.isEmpty)
+                      SliverFillRemaining(
+                        hasScrollBody: false,
+                        child: _CategoryEmptyState(category: category),
+                      )
+                    else ...[
+                      if (!category.isDraft)
+                        SliverToBoxAdapter(
+                          child: Padding(
+                            padding: const EdgeInsets.only(bottom: 14),
+                            child: _CategoryProgressBanner(
+                              category: category,
+                              completed: completed.length,
+                              total: all.length,
+                            ),
+                          ),
+                        )
+                      else
+                        SliverToBoxAdapter(
+                          child: Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: Text(
+                              'Drafts are paused. Use the menu to restore a task to its original tab.',
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
+                                  ?.copyWith(
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onSurfaceVariant,
+                                  ),
+                            ),
+                          ),
+                        ),
+                      if (category.isDraft)
+                        SliverReorderableList(
+                          itemCount: all.length,
+                          proxyDecorator: _proxyDecorator,
+                          onReorder: (oldIndex, newIndex) =>
+                              controller.reorderCategory(
+                            category,
+                            oldIndex,
+                            newIndex,
+                          ),
+                          itemBuilder: (_, i) =>
+                              _buildTile(all[i], i, reorderable: true),
+                        )
+                      else ...[
+                        if (pending.isNotEmpty)
+                          SliverReorderableList(
+                            itemCount: pending.length,
+                            proxyDecorator: _proxyDecorator,
+                            onReorder: (oldIndex, newIndex) =>
+                                controller.reorderCategory(
+                              category,
+                              oldIndex,
+                              newIndex,
+                            ),
+                            itemBuilder: (_, i) =>
+                                _buildTile(pending[i], i, reorderable: true),
+                          ),
+                        if (completed.isNotEmpty) ...[
+                          SliverToBoxAdapter(
+                            child: _SectionLabel(
+                              title: 'COMPLETED',
+                              count: completed.length,
+                            ),
+                          ),
+                          SliverList(
+                            delegate: SliverChildBuilderDelegate(
+                              (_, i) => _buildTile(
+                                completed[i],
+                                i,
+                                reorderable: false,
+                              ),
+                              childCount: completed.length,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ],
+                  ],
                 ),
-                SizedBox(height: 2),
-                Text(
-                  'Make progress, one step at a time.',
-                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
-                ),
-              ],
-            ),
-            actions: [
-              IconButton(
-                tooltip: 'Reset progress',
-                onPressed: _current.totalCount == 0 ? null : _confirmReset,
-                icon: const Icon(Icons.restart_alt_rounded),
               ),
-              const SizedBox(width: 8),
             ],
           ),
-          body: isLoading
-              ? const Center(child: CircularProgressIndicator())
-              : RefreshIndicator(
-                  onRefresh: () =>
-                      Future.wait([_controller.load(), _religion.load()]),
-                  child: CustomScrollView(
-                    physics: const AlwaysScrollableScrollPhysics(),
-                    slivers: [
-                      SliverPadding(
-                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 110),
-                        sliver: SliverMainAxisGroup(slivers: _buildSlivers()),
-                      ),
-                    ],
-                  ),
-                ),
-          floatingActionButton: FloatingActionButton.extended(
-            onPressed: () => _openTaskSheet(startAsDraft: _tab == _tabDrafts),
-            icon: const Icon(Icons.add_rounded),
-            label: Text(
-              _tab == _tabDrafts ? 'New draft' : 'New task',
-              style: const TextStyle(fontWeight: FontWeight.w700),
-            ),
-          ),
-        );
-      },
+        ),
+      ),
     );
   }
 }
 
-class _TabData {
-  const _TabData(this.label, this.icon, this.count);
-
-  final String label;
-  final IconData icon;
-  final int count;
-}
-
-class _TabSwitcher extends StatelessWidget {
-  const _TabSwitcher({
-    required this.index,
-    required this.tabs,
-    required this.onChanged,
+class _CategoryProgressBanner extends StatelessWidget {
+  const _CategoryProgressBanner({
+    required this.category,
+    required this.completed,
+    required this.total,
   });
 
-  final int index;
-  final List<_TabData> tabs;
-  final ValueChanged<int> onChanged;
+  final TaskCategory category;
+  final int completed;
+  final int total;
 
   @override
   Widget build(BuildContext context) {
+    final progress = total == 0 ? 0.0 : completed / total;
+    final color = category.color;
+
     return Container(
-      padding: const EdgeInsets.all(4),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFFECEDF3),
-        borderRadius: BorderRadius.circular(16),
+        gradient: LinearGradient(
+          colors: [color, color.withValues(alpha: 0.80)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(20),
       ),
       child: Row(
         children: [
-          for (var i = 0; i < tabs.length; i++)
-            _TabItem(
-              label: tabs[i].label,
-              icon: tabs[i].icon,
-              count: tabs[i].count,
-              selected: index == i,
-              onTap: () => onChanged(i),
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.18),
+              borderRadius: BorderRadius.circular(14),
             ),
+            child: Icon(category.icon, color: Colors.white),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  category.label,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: LinearProgressIndicator(
+                    minHeight: 6,
+                    value: progress,
+                    backgroundColor: Colors.white.withValues(alpha: 0.24),
+                    valueColor:
+                        const AlwaysStoppedAnimation<Color>(Colors.white),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  '$completed of $total completed',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 200),
+            child: Text(
+              '${(progress * 100).round()}%',
+              key: ValueKey((progress * 100).round()),
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
         ],
       ),
     );
   }
 }
 
-class _TabItem extends StatelessWidget {
-  const _TabItem({
-    required this.label,
-    required this.icon,
-    required this.count,
-    required this.selected,
-    required this.onTap,
-  });
+class _CategoryEmptyState extends StatelessWidget {
+  const _CategoryEmptyState({required this.category});
 
-  final String label;
-  final IconData icon;
-  final int count;
-  final bool selected;
-  final VoidCallback onTap;
+  final TaskCategory category;
 
   @override
   Widget build(BuildContext context) {
-    final primary = Theme.of(context).colorScheme.primary;
-    final fg = selected ? primary : const Color(0xFF777A86);
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final color = category.color;
 
-    return Expanded(
-      child: Semantics(
-        button: true,
-        selected: selected,
-        label: '$label, $count',
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: onTap,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 180),
-            curve: Curves.easeOut,
-            padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 4),
-            decoration: BoxDecoration(
-              color: selected ? Colors.white : Colors.transparent,
-              borderRadius: BorderRadius.circular(12),
-              boxShadow: selected
-                  ? [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: .06),
-                        blurRadius: 8,
-                        offset: const Offset(0, 2),
-                      ),
-                    ]
-                  : null,
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 48),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 80,
+              height: 80,
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.12),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(category.icon, size: 38, color: color),
             ),
-            // Scales down on narrow screens so three tabs always fit.
-            child: FittedBox(
-              fit: BoxFit.scaleDown,
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(icon, size: 18, color: fg),
-                  const SizedBox(width: 6),
-                  Text(
-                    label,
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
-                      color: fg,
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
-                    decoration: BoxDecoration(
-                      color: fg.withValues(alpha: .12),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Text(
-                      '$count',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w800,
-                        color: fg,
-                      ),
-                    ),
-                  ),
-                ],
+            const SizedBox(height: 18),
+            Text(
+              category.isDraft ? 'No drafts yet' : 'No tasks here yet',
+              style: theme.textTheme.titleLarge?.copyWith(
+                fontWeight: FontWeight.w800,
               ),
             ),
-          ),
+            const SizedBox(height: 8),
+            Text(
+              category.isDraft
+                  ? 'Send any task to Draft from its menu to pause it here.'
+                  : 'Tap "Add task" below to create your first ${category.label} task.',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: colorScheme.onSurfaceVariant,
+                height: 1.45,
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -521,8 +666,9 @@ class _SectionLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final color = Theme.of(context).colorScheme.onSurfaceVariant;
     return Padding(
-      padding: const EdgeInsets.only(top: 10, bottom: 10),
+      padding: const EdgeInsets.only(top: 10, bottom: 10, left: 2, right: 2),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
@@ -530,9 +676,9 @@ class _SectionLabel extends StatelessWidget {
             title,
             style: TextStyle(
               fontSize: 12,
-              letterSpacing: 1.2,
+              letterSpacing: 1.1,
               fontWeight: FontWeight.w800,
-              color: Colors.grey.shade600,
+              color: color,
             ),
           ),
           Text(
@@ -540,7 +686,7 @@ class _SectionLabel extends StatelessWidget {
             style: TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.w600,
-              color: Colors.grey.shade500,
+              color: color,
             ),
           ),
         ],
@@ -549,180 +695,65 @@ class _SectionLabel extends StatelessWidget {
   }
 }
 
-class _HintLine extends StatelessWidget {
-  const _HintLine(this.text);
+class _MoveCategorySheet extends StatelessWidget {
+  const _MoveCategorySheet({required this.currentCategory});
 
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10, left: 2),
-      child: Text(
-        text,
-        style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
-      ),
-    );
-  }
-}
-
-class _InlineHint extends StatelessWidget {
-  const _InlineHint({required this.text});
-
-  final String text;
+  final TaskCategory currentCategory;
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 18),
-      child: Center(
-        child: Text(
-          text,
-          textAlign: TextAlign.center,
-          style: const TextStyle(color: Color(0xFF777A86)),
-        ),
-      ),
-    );
-  }
-}
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
 
-class _ProgressHeader extends StatelessWidget {
-  const _ProgressHeader({
-    required this.completed,
-    required this.total,
-    required this.progress,
-  });
-
-  final int completed;
-  final int total;
-  final double progress;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = Theme.of(context).colorScheme.primary;
-
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [color, color.withValues(alpha: .82)],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(24),
-        boxShadow: [
-          BoxShadow(
-            color: color.withValues(alpha: .18),
-            blurRadius: 24,
-            offset: const Offset(0, 10),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Today’s progress',
-                      style: TextStyle(
-                        color: Colors.white70,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    SizedBox(height: 5),
-                    Text(
-                      'Keep going.',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 24,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Container(
-                width: 58,
-                height: 58,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: .16),
-                  shape: BoxShape.circle,
-                ),
-                child: Text(
-                  '${(progress * 100).round()}%',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 22),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(10),
-            child: LinearProgressIndicator(
-              minHeight: 8,
-              value: progress,
-              backgroundColor: Colors.white.withValues(alpha: .20),
-              valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
-            ),
-          ),
-          const SizedBox(height: 10),
-          Text(
-            '$completed of $total tasks completed',
-            style: const TextStyle(
-              color: Colors.white70,
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _EmptyState extends StatelessWidget {
-  const _EmptyState();
-
-  @override
-  Widget build(BuildContext context) {
-    final color = Theme.of(context).colorScheme.primary;
-
-    return Center(
+    return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(36, 48, 36, 36),
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
         child: Column(
           mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Container(
-              width: 88,
-              height: 88,
-              decoration: BoxDecoration(
-                color: color.withValues(alpha: .10),
-                shape: BoxShape.circle,
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              child: Text(
+                'Move task to...',
+                style: theme.textTheme.titleLarge?.copyWith(
+                  fontWeight: FontWeight.w800,
+                ),
               ),
-              child: Icon(Icons.checklist_rounded, size: 42, color: color),
             ),
-            const SizedBox(height: 22),
-            const Text(
-              'Nothing here yet',
-              style: TextStyle(fontSize: 23, fontWeight: FontWeight.w800),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'Create a task and set how much work is left.\nYou can change it anytime.',
-              textAlign: TextAlign.center,
-              style: TextStyle(height: 1.5, color: Color(0xFF777A86)),
-            ),
+            const SizedBox(height: 4),
+            for (final category in TaskCategory.values)
+              ListTile(
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                enabled: category != currentCategory,
+                leading: CircleAvatar(
+                  backgroundColor: category.color.withValues(
+                    alpha: category == currentCategory ? 0.08 : 0.16,
+                  ),
+                  child: Icon(
+                    category.icon,
+                    size: 20,
+                    color: category == currentCategory
+                        ? colorScheme.onSurfaceVariant.withValues(alpha: 0.45)
+                        : category.color,
+                  ),
+                ),
+                title: Text(
+                  category.label,
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+                trailing: category == currentCategory
+                    ? Text(
+                        'Current',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                        ),
+                      )
+                    : const Icon(Icons.chevron_right_rounded),
+                onTap: () => Navigator.pop(context, category),
+              ),
           ],
         ),
       ),
@@ -735,30 +766,28 @@ class _TaskFormResult {
     required this.title,
     required this.target,
     required this.remaining,
-    required this.isDraft,
+    required this.category,
   });
 
   final String title;
   final double target;
   final double remaining;
-  final bool isDraft;
+  final TaskCategory category;
 }
 
 class _TaskFormSheet extends StatefulWidget {
   const _TaskFormSheet({
     required this.isEditing,
-    required this.allowDraft,
-    required this.initialDraft,
+    required this.openedFromDraft,
+    required this.initialCategory,
     required this.titleController,
     required this.targetController,
     required this.remainingController,
   });
 
   final bool isEditing;
-
-  /// False for the Religion list: hides the "Save as draft" switch.
-  final bool allowDraft;
-  final bool initialDraft;
+  final bool openedFromDraft;
+  final TaskCategory initialCategory;
   final TextEditingController titleController;
   final TextEditingController targetController;
   final TextEditingController remainingController;
@@ -769,22 +798,20 @@ class _TaskFormSheet extends StatefulWidget {
 
 class _TaskFormSheetState extends State<_TaskFormSheet> {
   String? _error;
-  late bool _isDraft = widget.allowDraft && widget.initialDraft;
+  late TaskCategory _selectedCategory = widget.initialCategory;
 
-  /// Accepts "1.5" and "1,5" (some keyboards use a comma).
   double? _parseAmount(String text) =>
       double.tryParse(text.trim().replaceAll(',', '.'));
 
   void _submit() {
     final title = widget.titleController.text.trim();
     final target = _parseAmount(widget.targetController.text);
-    // When creating, all the work is still remaining, so remaining == total.
     final remaining = widget.isEditing
         ? _parseAmount(widget.remainingController.text)
         : target;
 
     if (title.isEmpty) {
-      setState(() => _error = 'Enter a task name.');
+      setState(() => _error = 'Please enter a task title.');
       return;
     }
     if (target == null || target <= 0) {
@@ -792,17 +819,20 @@ class _TaskFormSheetState extends State<_TaskFormSheet> {
       return;
     }
     if (!isOnAmountStep(target)) {
-      setState(() => _error = 'Total must be in steps of 0.25 (e.g. 1, 1.25, 1.5).');
+      setState(() => _error = 'Total must be in steps of 0.25 (e.g. 1, 1.5).');
       return;
     }
     if (remaining == null || remaining < 0 || remaining > target) {
-      setState(() =>
-          _error = 'Remaining must be between 0 and ${formatAmount(target)}.');
+      setState(
+        () => _error =
+            'Remaining must be between 0 and ${formatAmount(target)}.',
+      );
       return;
     }
     if (!isOnAmountStep(remaining)) {
-      setState(() =>
-          _error = 'Remaining must be in steps of 0.25 (e.g. 0, 0.25, 0.5).');
+      setState(
+        () => _error = 'Remaining must be in steps of 0.25 (e.g. 0, 0.25).',
+      );
       return;
     }
 
@@ -812,13 +842,19 @@ class _TaskFormSheetState extends State<_TaskFormSheet> {
         title: title,
         target: target,
         remaining: remaining,
-        isDraft: widget.allowDraft && _isDraft,
+        category: _selectedCategory,
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final availableCategories = widget.isEditing
+        ? TaskCategory.values
+        : TaskCategory.homeCategories;
+
     return SingleChildScrollView(
       child: Padding(
         padding: EdgeInsets.fromLTRB(
@@ -832,23 +868,29 @@ class _TaskFormSheetState extends State<_TaskFormSheet> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              widget.isEditing ? 'Edit task' : 'Create a task',
-              style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+              widget.isEditing ? 'Edit task' : 'New task',
+              style: theme.textTheme.headlineSmall?.copyWith(
+                fontWeight: FontWeight.w800,
+              ),
             ),
             const SizedBox(height: 6),
             Text(
-              widget.isEditing
-                  ? 'Update the name, target, or remaining work.'
-                  : 'Set the total amount of work you want to finish.',
-              style: const TextStyle(color: Color(0xFF777A86)),
+              widget.openedFromDraft
+                  ? 'Draft is not a home tab — pick the category this task belongs to.'
+                  : widget.isEditing
+                      ? 'Update the title, amounts, or category.'
+                      : 'Add a task to ${_selectedCategory.label}.',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: colorScheme.onSurfaceVariant,
+              ),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 18),
             TextField(
               controller: widget.titleController,
               autofocus: !widget.isEditing,
               textInputAction: TextInputAction.next,
               decoration: const InputDecoration(
-                labelText: 'Task name',
+                labelText: 'Task title',
                 prefixIcon: Icon(Icons.task_alt_rounded),
               ),
             ),
@@ -888,41 +930,66 @@ class _TaskFormSheetState extends State<_TaskFormSheet> {
                 ],
               ],
             ),
-            const SizedBox(height: 8),
-            if (widget.allowDraft)
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                value: _isDraft,
-                onChanged: (v) => setState(() => _isDraft = v),
-                title: const Text(
-                  'Save as draft',
-                  style: TextStyle(fontWeight: FontWeight.w600),
-                ),
-                subtitle: const Text(
-                  'Drafts stay out of your progress until you move them to tasks.',
-                  style: TextStyle(fontSize: 12),
-                ),
+            const SizedBox(height: 16),
+            Text(
+              'Category',
+              style: theme.textTheme.labelLarge?.copyWith(
+                fontWeight: FontWeight.w700,
               ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final cat in availableCategories)
+                  ChoiceChip(
+                    avatar: Icon(
+                      cat.icon,
+                      size: 16,
+                      color: _selectedCategory == cat
+                          ? Colors.white
+                          : cat.color,
+                    ),
+                    label: Text(cat.label),
+                    selected: _selectedCategory == cat,
+                    selectedColor: cat.color,
+                    labelStyle: TextStyle(
+                      fontWeight: FontWeight.w600,
+                      color: _selectedCategory == cat
+                          ? Colors.white
+                          : colorScheme.onSurface,
+                    ),
+                    onSelected: (_) => setState(() => _selectedCategory = cat),
+                  ),
+              ],
+            ),
             if (_error != null) ...[
-              const SizedBox(height: 4),
+              const SizedBox(height: 10),
               Text(
                 _error!,
-                style: const TextStyle(
-                  color: Color(0xFFD83B3B),
+                style: TextStyle(
+                  color: colorScheme.error,
                   fontSize: 12,
                   fontWeight: FontWeight.w600,
                 ),
               ),
             ],
-            const SizedBox(height: 14),
+            const SizedBox(height: 18),
             FilledButton.icon(
               onPressed: _submit,
-              icon: Icon(widget.isEditing ? Icons.check_rounded : Icons.add_rounded),
-              label: Text(widget.isEditing ? 'Save changes' : 'Create task'),
               style: FilledButton.styleFrom(
-                minimumSize: const Size.fromHeight(54),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                backgroundColor: _selectedCategory.color,
+                foregroundColor: Colors.white,
+                minimumSize: const Size.fromHeight(52),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
               ),
+              icon: Icon(
+                widget.isEditing ? Icons.check_rounded : Icons.add_rounded,
+              ),
+              label: Text(widget.isEditing ? 'Save changes' : 'Create task'),
             ),
           ],
         ),

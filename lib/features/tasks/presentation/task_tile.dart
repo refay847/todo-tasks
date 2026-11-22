@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../data/task_model.dart';
 
+enum _TileMenuAction { edit, move, draftOrRestore, delete }
+
 class TaskTile extends StatelessWidget {
   const TaskTile({
     super.key,
@@ -8,220 +10,174 @@ class TaskTile extends StatelessWidget {
     required this.index,
     required this.onToggle,
     required this.onEdit,
-    required this.onDelete,
+    required this.onMove,
+    required this.onDraftOrRestore,
+    required this.onConfirmDelete,
+    required this.onDeleteConfirmed,
     required this.onIncrease,
     required this.onDecrease,
-    required this.onToggleDraft,
     this.reorderable = true,
-    this.allowDraft = true,
   });
 
   final TaskModel task;
-
-  /// Index inside its reorderable list (needed by the drag handle).
   final int index;
   final VoidCallback onToggle;
   final VoidCallback onEdit;
-  final VoidCallback onDelete;
+  final VoidCallback onMove;
+  final VoidCallback onDraftOrRestore;
+  final Future<bool> Function() onConfirmDelete;
+  final VoidCallback onDeleteConfirmed;
   final VoidCallback onIncrease;
   final VoidCallback onDecrease;
-
-  /// Moves the task to Drafts (if active) or publishes it (if a draft).
-  final VoidCallback onToggleDraft;
-
-  /// Finished tasks are pinned to the bottom, so they have no drag handle.
   final bool reorderable;
-
-  /// When false (e.g. the Religion list) the task can't be moved to drafts:
-  /// the swipe-right action and the menu entry are removed.
-  final bool allowDraft;
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    final accent = task.isDraft
-        ? const Color(0xFF8A8D98)
-        : task.isCompleted
-            ? const Color(0xFF2E9B69)
-            : colorScheme.primary;
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final categoryColor = task.category.color;
+    final accent = task.isCompleted && !task.isDraft
+        ? const Color(0xFF16A34A)
+        : categoryColor;
 
+    final doneAmount = formatAmount(task.target - task.remaining);
+    final totalAmount = formatAmount(task.target);
     final subtitle = task.isDraft
-        ? 'Draft · ${formatAmount(task.target - task.remaining)} of ${formatAmount(task.target)} done'
+        ? 'Returns to: ${task.restoreCategory.label} · $doneAmount / $totalAmount'
         : task.isCompleted
             ? 'Completed'
-            : '${formatAmount(task.target - task.remaining)} of ${formatAmount(task.target)} done';
-
-    const deleteBackground = _SwipeBackground(
-      alignment: Alignment.centerRight,
-      color: Color(0xFFFFE8E8),
-      foreground: Color(0xFFD83B3B),
-      icon: Icons.delete_outline_rounded,
-      label: 'Delete',
-    );
+            : '$doneAmount of $totalAmount done';
 
     return Dismissible(
-      key: ValueKey(task.id),
-      direction: allowDraft
-          ? DismissDirection.horizontal
-          : DismissDirection.endToStart,
-      // Left -> right: move to drafts (or back to tasks). Right -> left: delete.
-      confirmDismiss: (direction) async {
-        if (direction == DismissDirection.startToEnd) {
-          onToggleDraft();
-        } else {
-          onDelete();
-        }
-        return false;
-      },
-      // Dismissible requires a background whenever secondaryBackground is set.
-      background: allowDraft
-          ? _SwipeBackground(
-              alignment: Alignment.centerLeft,
-              color: colorScheme.primary.withValues(alpha: .10),
-              foreground: colorScheme.primary,
-              icon: task.isDraft
-                  ? Icons.publish_rounded
-                  : Icons.drafts_outlined,
-              label: task.isDraft ? 'Move to tasks' : 'Move to drafts',
-            )
-          : deleteBackground,
-      secondaryBackground: deleteBackground,
+      key: ValueKey('dismiss_${task.id}'),
+      direction: DismissDirection.endToStart,
+      confirmDismiss: (_) => onConfirmDelete(),
+      onDismissed: (_) => onDeleteConfirmed(),
+      background: const SizedBox.shrink(),
+      secondaryBackground: _DeleteSwipeBackground(
+        color: colorScheme.errorContainer,
+        foreground: colorScheme.onErrorContainer,
+      ),
       child: Card(
+        clipBehavior: Clip.antiAlias,
         child: InkWell(
-          borderRadius: BorderRadius.circular(20),
           onTap: onEdit,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(2, 12, 14, 14),
-            child: Column(
+          child: IntrinsicHeight(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Row(
-                  children: [
-                    if (reorderable)
-                      ReorderableDragStartListener(
-                        index: index,
-                        child: Semantics(
-                          label: 'Drag to change priority',
-                          child: const Padding(
-                            padding:
-                                EdgeInsets.symmetric(horizontal: 6, vertical: 14),
-                            child: Icon(
-                              Icons.drag_indicator_rounded,
-                              color: Color(0xFFB3B6C2),
+                // Colored left accent bar matching the task's category.
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  width: 5,
+                  color: accent,
+                ),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(4, 12, 8, 12),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Row(
+                          children: [
+                            if (reorderable)
+                              ReorderableDragStartListener(
+                                index: index,
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 4,
+                                    vertical: 10,
+                                  ),
+                                  child: Icon(
+                                    Icons.drag_indicator_rounded,
+                                    size: 20,
+                                    color: colorScheme.onSurfaceVariant
+                                        .withValues(alpha: 0.5),
+                                  ),
+                                ),
+                              )
+                            else
+                              const SizedBox(width: 8),
+                            _CheckButton(
+                              completed: task.isCompleted,
+                              color: accent,
+                              onTap: onToggle,
                             ),
-                          ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    task.title,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.titleMedium?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                      height: 1.25,
+                                      color: task.isCompleted
+                                          ? colorScheme.onSurfaceVariant
+                                          : colorScheme.onSurface,
+                                      decoration: task.isCompleted
+                                          ? TextDecoration.lineThrough
+                                          : null,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 3),
+                                  Text(
+                                    subtitle,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.bodySmall?.copyWith(
+                                      fontWeight: FontWeight.w500,
+                                      color: task.isCompleted && !task.isDraft
+                                          ? accent
+                                          : colorScheme.onSurfaceVariant,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            _RemainingControl(
+                              task: task,
+                              accent: accent,
+                              onIncrease: onIncrease,
+                              onDecrease: onDecrease,
+                            ),
+                            _TaskMenuButton(
+                              task: task,
+                              onSelected: (action) async {
+                                switch (action) {
+                                  case _TileMenuAction.edit:
+                                    onEdit();
+                                  case _TileMenuAction.move:
+                                    onMove();
+                                  case _TileMenuAction.draftOrRestore:
+                                    onDraftOrRestore();
+                                  case _TileMenuAction.delete:
+                                    final confirmed = await onConfirmDelete();
+                                    if (confirmed) onDeleteConfirmed();
+                                }
+                              },
+                            ),
+                          ],
                         ),
-                      )
-                    else
-                      const SizedBox(width: 14),
-                    if (task.isDraft)
-                      _PublishButton(onTap: onToggleDraft)
-                    else
-                      _CheckButton(
-                        completed: task.isCompleted,
-                        color: accent,
-                        onTap: onToggle,
-                      ),
-                    const SizedBox(width: 12),
-                    _RemainingControl(
-                      task: task,
-                      accent: accent,
-                      onIncrease: onIncrease,
-                      onDecrease: onDecrease,
-                    ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          Text(
-                            task.title,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            textAlign: TextAlign.right,
-                            style: TextStyle(
-                              fontSize: 17,
-                              height: 1.25,
-                              fontWeight: FontWeight.w700,
-                              color: task.isCompleted || task.isDraft
-                                  ? const Color(0xFF8A8D98)
-                                  : const Color(0xFF20212A),
-                              decoration: task.isCompleted && !task.isDraft
-                                  ? TextDecoration.lineThrough
-                                  : null,
+                        const SizedBox(height: 10),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: LinearProgressIndicator(
+                              minHeight: 5,
+                              value: task.progress,
+                              backgroundColor:
+                                  colorScheme.surfaceContainerHighest,
+                              valueColor: AlwaysStoppedAnimation<Color>(accent),
                             ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            subtitle,
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w500,
-                              color: task.isCompleted && !task.isDraft
-                                  ? accent
-                                  : const Color(0xFF9295A1),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    PopupMenuButton<String>(
-                      padding: EdgeInsets.zero,
-                      tooltip: 'More options',
-                      onSelected: (value) {
-                        switch (value) {
-                          case 'edit':
-                            onEdit();
-                          case 'draft':
-                            onToggleDraft();
-                          case 'delete':
-                            onDelete();
-                        }
-                      },
-                      itemBuilder: (_) => [
-                        const PopupMenuItem(
-                          value: 'edit',
-                          child: ListTile(
-                            contentPadding: EdgeInsets.zero,
-                            leading: Icon(Icons.edit_outlined),
-                            title: Text('Edit task'),
-                          ),
-                        ),
-                        if (allowDraft)
-                          PopupMenuItem(
-                            value: 'draft',
-                            child: ListTile(
-                              contentPadding: EdgeInsets.zero,
-                              leading: Icon(task.isDraft
-                                  ? Icons.publish_rounded
-                                  : Icons.drafts_outlined),
-                              title: Text(task.isDraft
-                                  ? 'Move to tasks'
-                                  : 'Move to drafts'),
-                            ),
-                          ),
-                        const PopupMenuItem(
-                          value: 'delete',
-                          child: ListTile(
-                            contentPadding: EdgeInsets.zero,
-                            leading: Icon(Icons.delete_outline_rounded),
-                            title: Text('Delete task'),
                           ),
                         ),
                       ],
-                      icon: const Icon(Icons.more_horiz_rounded),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                Padding(
-                  padding: EdgeInsets.only(left: reorderable ? 12 : 24),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(10),
-                    child: LinearProgressIndicator(
-                      minHeight: 6,
-                      value: task.progress,
-                      backgroundColor: const Color(0xFFEDEEF3),
-                      valueColor: AlwaysStoppedAnimation<Color>(accent),
                     ),
                   ),
                 ),
@@ -234,53 +190,141 @@ class TaskTile extends StatelessWidget {
   }
 }
 
-class _SwipeBackground extends StatelessWidget {
-  const _SwipeBackground({
-    required this.alignment,
-    required this.color,
-    required this.foreground,
-    required this.icon,
-    required this.label,
+class _TaskMenuButton extends StatelessWidget {
+  const _TaskMenuButton({
+    required this.task,
+    required this.onSelected,
   });
 
-  final Alignment alignment;
-  final Color color;
-  final Color foreground;
-  final IconData icon;
-  final String label;
+  final TaskModel task;
+  final ValueChanged<_TileMenuAction> onSelected;
 
   @override
   Widget build(BuildContext context) {
-    final leading = alignment == Alignment.centerLeft;
-    final iconWidget = Icon(icon, color: foreground);
-    final text = Text(
-      label,
-      style: TextStyle(
-        color: foreground,
-        fontSize: 13,
-        fontWeight: FontWeight.w700,
-      ),
-    );
+    final colorScheme = Theme.of(context).colorScheme;
 
+    return PopupMenuButton<_TileMenuAction>(
+      tooltip: 'Task actions',
+      icon: Icon(
+        Icons.more_vert_rounded,
+        color: colorScheme.onSurfaceVariant,
+      ),
+      onSelected: onSelected,
+      itemBuilder: (context) => [
+        const PopupMenuItem(
+          value: _TileMenuAction.edit,
+          child: Row(
+            children: [
+              Icon(Icons.edit_outlined, size: 20),
+              SizedBox(width: 12),
+              Text('Edit'),
+            ],
+          ),
+        ),
+        const PopupMenuItem(
+          value: _TileMenuAction.move,
+          child: Row(
+            children: [
+              Icon(Icons.drive_file_move_outlined, size: 20),
+              SizedBox(width: 12),
+              Text('Move to...'),
+            ],
+          ),
+        ),
+        PopupMenuItem(
+          value: _TileMenuAction.draftOrRestore,
+          child: Row(
+            children: [
+              Icon(
+                task.isDraft ? Icons.restore_rounded : Icons.drafts_outlined,
+                size: 20,
+                color: task.isDraft ? task.restoreCategory.color : null,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(task.isDraft ? 'Restore' : 'Send to draft'),
+                    if (task.isDraft)
+                      Text(
+                        'Returns to: ${task.restoreCategory.label}',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: colorScheme.onSurfaceVariant,
+                            ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        const PopupMenuDivider(),
+        PopupMenuItem(
+          value: _TileMenuAction.delete,
+          child: Row(
+            children: [
+              Icon(
+                Icons.delete_outline_rounded,
+                size: 20,
+                color: colorScheme.error,
+              ),
+              const SizedBox(width: 12),
+              Text(
+                'Delete',
+                style: TextStyle(color: colorScheme.error),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _DeleteSwipeBackground extends StatelessWidget {
+  const _DeleteSwipeBackground({
+    required this.color,
+    required this.foreground,
+  });
+
+  final Color color;
+  final Color foreground;
+
+  @override
+  Widget build(BuildContext context) {
     return Container(
-      alignment: alignment,
+      alignment: Alignment.centerRight,
       padding: const EdgeInsets.symmetric(horizontal: 24),
       decoration: BoxDecoration(
         color: color,
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(18),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
-        children: leading
-            ? [iconWidget, const SizedBox(width: 8), text]
-            : [text, const SizedBox(width: 8), iconWidget],
+        children: [
+          Text(
+            'Delete',
+            style: TextStyle(
+              color: foreground,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Icon(Icons.delete_outline_rounded, color: foreground),
+        ],
       ),
     );
   }
 }
 
 class _CheckButton extends StatelessWidget {
-  const _CheckButton({required this.completed, required this.color, required this.onTap});
+  const _CheckButton({
+    required this.completed,
+    required this.color,
+    required this.onTap,
+  });
 
   final bool completed;
   final Color color;
@@ -288,59 +332,33 @@ class _CheckButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final outline = Theme.of(context).colorScheme.outlineVariant;
+
     return Semantics(
       button: true,
+      checked: completed,
       label: completed ? 'Mark task incomplete' : 'Mark task complete',
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(14),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          width: 46,
-          height: 46,
-          decoration: BoxDecoration(
-            color: completed ? color : Colors.transparent,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: completed ? color : const Color(0xFFD3D5DE), width: 2),
-          ),
-          child: Icon(
-            Icons.check_rounded,
-            size: 27,
-            color: completed ? Colors.white : Colors.transparent,
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Shown instead of the check button on drafts: moves the task to the active list.
-class _PublishButton extends StatelessWidget {
-  const _PublishButton({required this.onTap});
-
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Semantics(
-      button: true,
-      label: 'Move draft to tasks',
-      child: Tooltip(
-        message: 'Move to tasks',
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(14),
-          child: Container(
-            width: 46,
-            height: 46,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.all(4),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            width: 30,
+            height: 30,
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: const Color(0xFFD3D5DE), width: 2),
+              color: completed ? color : Colors.transparent,
+              borderRadius: BorderRadius.circular(9),
+              border: Border.all(
+                color: completed ? color : outline,
+                width: 2,
+              ),
             ),
-            child: const Icon(
-              Icons.publish_rounded,
-              size: 24,
-              color: Color(0xFF8A8D98),
+            child: Icon(
+              Icons.check_rounded,
+              size: 19,
+              color: completed ? Colors.white : Colors.transparent,
             ),
           ),
         ),
@@ -364,51 +382,71 @@ class _RemainingControl extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Material(
-          color: accent.withValues(alpha: .10),
-          borderRadius: BorderRadius.circular(15),
-          child: InkWell(
+    return Container(
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _StepIconButton(
+            icon: Icons.remove_rounded,
+            tooltip: 'Decrease remaining',
             onTap: onDecrease,
-            borderRadius: BorderRadius.circular(15),
-            child: const SizedBox(
-              width: 48,
-              height: 27,
-              child: Icon(Icons.remove_rounded, size: 18),
-            ),
           ),
-        ),
-        Container(
-          width: 56,
-          height: 44,
-          alignment: Alignment.center,
-          child: FittedBox(
-            fit: BoxFit.scaleDown,
-            child: Text(
-              formatAmount(task.remaining),
-              style: TextStyle(
-                fontSize: 23,
-                fontWeight: FontWeight.w800,
-                color: accent,
+          ConstrainedBox(
+            constraints: const BoxConstraints(minWidth: 28, maxWidth: 46),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 2),
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  formatAmount(task.remaining),
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800,
+                    color: accent,
+                  ),
+                ),
               ),
             ),
           ),
-        ),
-        Material(
-          color: accent.withValues(alpha: .10),
-          borderRadius: BorderRadius.circular(15),
-          child: InkWell(
+          _StepIconButton(
+            icon: Icons.add_rounded,
+            tooltip: 'Increase remaining',
             onTap: onIncrease,
-            borderRadius: BorderRadius.circular(15),
-            child: const SizedBox(
-              width: 48,
-              height: 27,
-              child: Icon(Icons.add_rounded, size: 18),
-            ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StepIconButton extends StatelessWidget {
+  const _StepIconButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: SizedBox(
+          width: 30,
+          height: 34,
+          child: Icon(icon, size: 16),
         ),
-      ],
+      ),
     );
   }
 }

@@ -2,41 +2,42 @@ import 'package:flutter/foundation.dart';
 import '../../../core/storage/task_storage.dart';
 import '../data/task_model.dart';
 
-/// Priority is the position in the persisted list: index 0 is the most important.
-/// Active tasks and drafts live in one list; each group keeps its own order.
-///
-/// Finished tasks are only *displayed* at the bottom of the Tasks tab
-/// ([pendingTasks] then [completedTasks]). The stored order is never touched
-/// by completing a task, so un-completing it or pressing "Reset" puts every
-/// task back at its original priority.
+/// Holds all tasks across all 6 categories in a single persisted list.
+/// Position in the list represents priority within each category.
 class TaskController extends ChangeNotifier {
-  TaskController({TaskStorage? storage}) : _storage = storage ?? TaskStorage();
+  TaskController({TaskStorage? storage})
+      : _storage = storage ?? const TaskStorage();
 
   final TaskStorage _storage;
   List<TaskModel> _tasks = [];
   bool _isLoading = true;
+  int _idCounter = 0;
 
   bool get isLoading => _isLoading;
 
-  List<TaskModel> get activeTasks => _group(draft: false);
-  List<TaskModel> get draftTasks => _group(draft: true);
+  List<TaskModel> get allTasks => List.unmodifiable(_tasks);
 
-  /// Unfinished active tasks, in priority order (drag-and-drop list).
-  List<TaskModel> get pendingTasks => List.unmodifiable(
-      _tasks.where((t) => !t.isDraft && !t.isCompleted));
+  List<TaskModel> tasksFor(TaskCategory category) =>
+      List.unmodifiable(_tasks.where((t) => t.category == category));
 
-  /// Finished active tasks, shown below the pending ones.
-  List<TaskModel> get completedTasks => List.unmodifiable(
-      _tasks.where((t) => !t.isDraft && t.isCompleted));
+  List<TaskModel> pendingTasksFor(TaskCategory category) => List.unmodifiable(
+        _tasks.where((t) => t.category == category && !t.isCompleted),
+      );
 
-  int get totalCount => _tasks.length;
-  int get activeCount => _tasks.where((t) => !t.isDraft).length;
-  int get draftCount => _tasks.where((t) => t.isDraft).length;
-  int get completedCount =>
-      _tasks.where((t) => !t.isDraft && t.isCompleted).length;
+  List<TaskModel> completedTasksFor(TaskCategory category) => List.unmodifiable(
+        _tasks.where((t) => t.category == category && t.isCompleted),
+      );
 
-  List<TaskModel> _group({required bool draft}) =>
-      List.unmodifiable(_tasks.where((t) => t.isDraft == draft));
+  int countFor(TaskCategory category) =>
+      _tasks.where((t) => t.category == category).length;
+
+  int completedCountFor(TaskCategory category) =>
+      _tasks.where((t) => t.category == category && t.isCompleted).length;
+
+  String _generateId() {
+    _idCounter += 1;
+    return '${DateTime.now().microsecondsSinceEpoch}_$_idCounter';
+  }
 
   Future<void> load() async {
     _isLoading = true;
@@ -46,21 +47,24 @@ class TaskController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> addTask(
-    String title,
-    double target,
-    double remaining, {
-    bool isDraft = false,
+  Future<void> addTask({
+    required String title,
+    required double target,
+    required double remaining,
+    required TaskCategory category,
   }) async {
     final cleanTitle = title.trim();
     if (cleanTitle.isEmpty || target <= 0) return;
 
+    // Draft is not a real home category; fall back to Work if ever passed.
+    final safeCategory = category.isDraft ? TaskCategory.work : category;
+
     final task = TaskModel(
-      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      id: _generateId(),
       title: cleanTitle,
       target: target,
       remaining: remaining.clamp(0.0, target).toDouble(),
-      isDraft: isDraft,
+      category: safeCategory,
     );
 
     _tasks = [..._tasks, task];
@@ -72,55 +76,123 @@ class TaskController extends ChangeNotifier {
     required String title,
     required double target,
     required double remaining,
-    bool? isDraft,
+    TaskCategory? category,
   }) async {
-    if (title.trim().isEmpty || target <= 0) return;
+    final cleanTitle = title.trim();
+    if (cleanTitle.isEmpty || target <= 0) return;
 
     final index = _tasks.indexWhere((t) => t.id == id);
     if (index < 0) return;
 
     final old = _tasks[index];
+    final nextCategory = category ?? old.category;
+    final categoryChanged = nextCategory != old.category;
+
+    TaskCategory? nextPrevious = old.previousCategory;
+    var clearPrevious = false;
+
+    if (categoryChanged) {
+      if (nextCategory.isDraft) {
+        nextPrevious = old.category.isDraft ? old.previousCategory : old.category;
+      } else {
+        clearPrevious = true;
+      }
+    }
+
     final updated = old.copyWith(
-      title: title.trim(),
+      title: cleanTitle,
       target: target,
       remaining: remaining.clamp(0.0, target).toDouble(),
-      isDraft: isDraft,
+      category: nextCategory,
+      previousCategory: nextPrevious,
+      clearPreviousCategory: clearPrevious,
     );
 
     final list = [..._tasks];
-    if (updated.isDraft != old.isDraft) {
-      // Switching group: goes to the end (lowest priority) of the new group.
+    if (categoryChanged) {
       list
         ..removeAt(index)
         ..add(updated);
     } else {
+      // Same category: preserve exact position in place.
       list[index] = updated;
     }
+
     _tasks = list;
     await _commit();
   }
 
-  /// Moves a task between Active and Drafts (to the end of the target group).
-  Future<void> setDraft(String id, bool isDraft) async {
+  /// Moves a task into Draft and remembers its current category for restore.
+  Future<void> sendToDraft(String id) async {
     final index = _tasks.indexWhere((t) => t.id == id);
-    if (index < 0 || _tasks[index].isDraft == isDraft) return;
+    if (index < 0) return;
+
+    final current = _tasks[index];
+    if (current.isDraft) return;
 
     final list = [..._tasks];
-    final task = list.removeAt(index).copyWith(isDraft: isDraft);
-    _tasks = [...list, task];
+    final drafted = list.removeAt(index).copyWith(
+          previousCategory: current.category,
+          category: TaskCategory.draft,
+        );
+    _tasks = [...list, drafted];
     await _commit();
   }
 
-  /// Reorders the unfinished tasks. Indexes follow [ReorderableList.onReorder]
-  /// (newIndex is not yet adjusted). Finished tasks keep their stored slots.
-  Future<void> reorderPending(int oldIndex, int newIndex) =>
-      _reorderGroup((t) => !t.isDraft && !t.isCompleted, oldIndex, newIndex);
+  /// Restores a drafted task back to its previous category (fallback: Work).
+  Future<TaskCategory?> restoreFromDraft(String id) async {
+    final index = _tasks.indexWhere((t) => t.id == id);
+    if (index < 0) return null;
 
-  Future<void> reorderDrafts(int oldIndex, int newIndex) =>
-      _reorderGroup((t) => t.isDraft, oldIndex, newIndex);
+    final current = _tasks[index];
+    if (!current.isDraft) return null;
 
-  /// Reorders the tasks matching [inGroup] by re-filling the slots they
-  /// occupy, so every task outside the group stays exactly where it was.
+    final targetCategory = current.restoreCategory;
+    final list = [..._tasks];
+    final restored = list.removeAt(index).copyWith(
+          category: targetCategory,
+          clearPreviousCategory: true,
+        );
+    _tasks = [...list, restored];
+    await _commit();
+    return targetCategory;
+  }
+
+  /// Moves a task to any other category. Moving to Draft remembers its origin;
+  /// moving out of Draft clears `previousCategory`.
+  Future<void> moveTask(String id, TaskCategory targetCategory) async {
+    final index = _tasks.indexWhere((t) => t.id == id);
+    if (index < 0) return;
+
+    final current = _tasks[index];
+    if (current.category == targetCategory) return;
+
+    if (targetCategory.isDraft) {
+      await sendToDraft(id);
+      return;
+    }
+
+    final list = [..._tasks];
+    final moved = list.removeAt(index).copyWith(
+          category: targetCategory,
+          clearPreviousCategory: true,
+        );
+    _tasks = [...list, moved];
+    await _commit();
+  }
+
+  /// Reorders unfinished tasks within a category (or all tasks inside Draft).
+  Future<void> reorderCategory(
+    TaskCategory category,
+    int oldIndex,
+    int newIndex,
+  ) {
+    final predicate = category.isDraft
+        ? (TaskModel t) => t.category == TaskCategory.draft
+        : (TaskModel t) => t.category == category && !t.isCompleted;
+    return _reorderGroup(predicate, oldIndex, newIndex);
+  }
+
   Future<void> _reorderGroup(
     bool Function(TaskModel) inGroup,
     int oldIndex,
@@ -157,19 +229,32 @@ class TaskController extends ChangeNotifier {
     await _commit();
   }
 
-  Future<void> deleteTask(String id) async {
-    _tasks = _tasks.where((task) => task.id != id).toList();
+  /// Deletes a task and returns its snapshot + index so UNDO can restore it.
+  Future<({TaskModel task, int index})?> deleteTask(String id) async {
+    final index = _tasks.indexWhere((t) => t.id == id);
+    if (index < 0) return null;
+
+    final list = [..._tasks];
+    final removed = list.removeAt(index);
+    _tasks = list;
     await _commit();
+    return (task: removed, index: index);
   }
 
-  Future<void> restoreTask(TaskModel task) async {
+  Future<void> insertTaskAt(TaskModel task, int index) async {
     if (_tasks.any((item) => item.id == task.id)) return;
-    _tasks = [..._tasks, task];
+    final list = [..._tasks];
+    final safeIndex = index.clamp(0, list.length).toInt();
+    list.insert(safeIndex, task);
+    _tasks = list;
     await _commit();
   }
 
-  Future<void> resetAll() async {
-    _tasks = _tasks.map((t) => t.copyWith(remaining: t.target)).toList();
+  Future<void> resetCategory(TaskCategory category) async {
+    _tasks = _tasks.map((t) {
+      if (t.category != category) return t;
+      return t.copyWith(remaining: t.target);
+    }).toList();
     await _commit();
   }
 
