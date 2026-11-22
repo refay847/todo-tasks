@@ -81,6 +81,7 @@ class _TasksPageState extends State<TasksPage>
         isEditing: isEditing,
         openedFromDraft: openedFromDraft,
         initialCategory: initialCategory,
+        initialStep: task?.step ?? kAmountStep,
         titleController: titleController,
         targetController: targetController,
         remainingController: remainingController,
@@ -100,6 +101,7 @@ class _TasksPageState extends State<TasksPage>
         target: result.target,
         remaining: result.remaining,
         category: result.category,
+        step: result.step,
       );
     } else {
       await _controller.addTask(
@@ -107,6 +109,7 @@ class _TasksPageState extends State<TasksPage>
         target: result.target,
         remaining: result.remaining,
         category: result.category,
+        step: result.step,
       );
       // If added while viewing Draft (or to another tab), jump to that tab.
       if (result.category != _currentCategory) {
@@ -384,9 +387,9 @@ class _CategoryTaskList extends StatelessWidget {
         onConfirmDelete: () => onConfirmDelete(task),
         onDeleteConfirmed: () => onDeleteConfirmed(task),
         onIncrease: () =>
-            controller.setRemaining(task.id, task.remaining + kAmountStep),
+            controller.setRemaining(task.id, task.remaining + task.step),
         onDecrease: () =>
-            controller.setRemaining(task.id, task.remaining - kAmountStep),
+            controller.setRemaining(task.id, task.remaining - task.step),
       ),
     );
   }
@@ -767,12 +770,14 @@ class _TaskFormResult {
     required this.target,
     required this.remaining,
     required this.category,
+    required this.step,
   });
 
   final String title;
   final double target;
   final double remaining;
   final TaskCategory category;
+  final double step;
 }
 
 class _TaskFormSheet extends StatefulWidget {
@@ -780,6 +785,7 @@ class _TaskFormSheet extends StatefulWidget {
     required this.isEditing,
     required this.openedFromDraft,
     required this.initialCategory,
+    required this.initialStep,
     required this.titleController,
     required this.targetController,
     required this.remainingController,
@@ -788,6 +794,7 @@ class _TaskFormSheet extends StatefulWidget {
   final bool isEditing;
   final bool openedFromDraft;
   final TaskCategory initialCategory;
+  final double initialStep;
   final TextEditingController titleController;
   final TextEditingController targetController;
   final TextEditingController remainingController;
@@ -799,9 +806,16 @@ class _TaskFormSheet extends StatefulWidget {
 class _TaskFormSheetState extends State<_TaskFormSheet> {
   String? _error;
   late TaskCategory _selectedCategory = widget.initialCategory;
+  late double _step = widget.initialStep;
 
   double? _parseAmount(String text) =>
       double.tryParse(text.trim().replaceAll(',', '.'));
+
+  void _changeStep(double delta) {
+    final clamped = (_step + delta).clamp(kMinStep, kMaxStep).toDouble();
+    final rounded = (clamped / kAmountStep).round() * kAmountStep;
+    setState(() => _step = rounded.clamp(kMinStep, kMaxStep).toDouble());
+  }
 
   void _submit() {
     final title = widget.titleController.text.trim();
@@ -843,6 +857,7 @@ class _TaskFormSheetState extends State<_TaskFormSheet> {
         target: target,
         remaining: remaining,
         category: _selectedCategory,
+        step: _step,
       ),
     );
   }
@@ -929,6 +944,55 @@ class _TaskFormSheetState extends State<_TaskFormSheet> {
                   ),
                 ],
               ],
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'Hours per tap',
+              style: theme.textTheme.labelLarge?.copyWith(
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              'How much the + and - buttons on the task change the remaining amount.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Container(
+              decoration: BoxDecoration(
+                color: colorScheme.surfaceContainerHighest
+                    .withValues(alpha: 0.55),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Row(
+                children: [
+                  IconButton(
+                    tooltip: 'Decrease step',
+                    onPressed: _step <= kMinStep
+                        ? null
+                        : () => _changeStep(-kAmountStep),
+                    icon: const Icon(Icons.remove_rounded),
+                  ),
+                  Expanded(
+                    child: Text(
+                      '${formatAmount(_step)} h',
+                      textAlign: TextAlign.center,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Increase step',
+                    onPressed: _step >= kMaxStep
+                        ? null
+                        : () => _changeStep(kAmountStep),
+                    icon: const Icon(Icons.add_rounded),
+                  ),
+                ],
+              ),
             ),
             const SizedBox(height: 16),
             Text(

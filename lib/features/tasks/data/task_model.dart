@@ -2,11 +2,13 @@ import 'package:flutter/material.dart';
 
 /// Smallest amount a task can be increased or decreased by.
 const double kAmountStep = 0.25;
+const double kMinStep = 0.25;
+const double kMaxStep = 24.0;
 
-/// True when [value] is a multiple of [kAmountStep] (0, 0.25, 0.5, 0.75, 1 ...).
-bool isOnAmountStep(double value) {
-  final steps = value / kAmountStep;
-  return steps == steps.roundToDouble();
+/// True when [value] is a multiple of [step] (0, 0.25, 0.5, 0.75, 1 ...).
+bool isOnAmountStep(double value, {double step = kAmountStep}) {
+  final steps = value / step;
+  return (steps - steps.roundToDouble()).abs() < 1e-9;
 }
 
 /// Formats 2.0 -> "2", 2.5 -> "2.5", 2.25 -> "2.25".
@@ -78,6 +80,7 @@ class TaskModel {
   final String title;
   final double target;
   final double remaining;
+  final double step;
   final TaskCategory category;
 
   /// Remembers the home category a task came from when moved into Draft.
@@ -88,6 +91,7 @@ class TaskModel {
     required this.title,
     required this.target,
     required this.remaining,
+    this.step = kAmountStep,
     this.category = TaskCategory.work,
     this.previousCategory,
   });
@@ -113,6 +117,7 @@ class TaskModel {
     String? title,
     double? target,
     double? remaining,
+    double? step,
     TaskCategory? category,
     TaskCategory? previousCategory,
     bool clearPreviousCategory = false,
@@ -122,6 +127,7 @@ class TaskModel {
       title: title ?? this.title,
       target: target ?? this.target,
       remaining: remaining ?? this.remaining,
+      step: step ?? this.step,
       category: category ?? this.category,
       previousCategory: clearPreviousCategory
           ? null
@@ -134,6 +140,7 @@ class TaskModel {
         'title': title,
         'target': target,
         'remaining': remaining,
+        'step': step,
         'category': category.name,
         'previousCategory': previousCategory?.name,
       };
@@ -149,6 +156,11 @@ class TaskModel {
         .toDouble();
     final rawTarget = (json['target'] as num?)?.toDouble() ?? remaining;
     final target = rawTarget <= 0 ? (remaining > 0 ? remaining : 1.0) : rawTarget;
+
+    final rawStep = (json['step'] as num?)?.toDouble();
+    final step = (rawStep == null || rawStep.isNaN || rawStep <= 0)
+        ? kAmountStep
+        : rawStep.clamp(kMinStep, kMaxStep).toDouble();
 
     final parsedCategory = TaskCategory.fromName(json['category'] as String?);
     final legacyIsDraft = json['isDraft'] as bool? ?? false;
@@ -173,6 +185,7 @@ class TaskModel {
       title: (json['title'] as String?)?.trim() ?? 'Untitled task',
       target: target,
       remaining: remaining.clamp(0.0, target).toDouble(),
+      step: step,
       category: category,
       previousCategory: previousCategory,
     );

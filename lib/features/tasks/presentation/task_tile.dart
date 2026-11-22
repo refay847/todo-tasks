@@ -392,7 +392,7 @@ class _RemainingControl extends StatelessWidget {
         children: [
           _StepIconButton(
             icon: Icons.remove_rounded,
-            tooltip: 'Decrease remaining',
+            tooltip: 'Decrease remaining by ${formatAmount(task.step)}',
             onTap: onDecrease,
           ),
           ConstrainedBox(
@@ -414,7 +414,7 @@ class _RemainingControl extends StatelessWidget {
           ),
           _StepIconButton(
             icon: Icons.add_rounded,
-            tooltip: 'Increase remaining',
+            tooltip: 'Increase remaining by ${formatAmount(task.step)}',
             onTap: onIncrease,
           ),
         ],

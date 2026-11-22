@@ -52,18 +52,21 @@ class TaskController extends ChangeNotifier {
     required double target,
     required double remaining,
     required TaskCategory category,
+    double step = kAmountStep,
   }) async {
     final cleanTitle = title.trim();
     if (cleanTitle.isEmpty || target <= 0) return;
 
     // Draft is not a real home category; fall back to Work if ever passed.
     final safeCategory = category.isDraft ? TaskCategory.work : category;
+    final safeStep = step.clamp(kMinStep, kMaxStep).toDouble();
 
     final task = TaskModel(
       id: _generateId(),
       title: cleanTitle,
       target: target,
       remaining: remaining.clamp(0.0, target).toDouble(),
+      step: safeStep,
       category: safeCategory,
     );
 
@@ -77,6 +80,7 @@ class TaskController extends ChangeNotifier {
     required double target,
     required double remaining,
     TaskCategory? category,
+    double? step,
   }) async {
     final cleanTitle = title.trim();
     if (cleanTitle.isEmpty || target <= 0) return;
@@ -87,6 +91,7 @@ class TaskController extends ChangeNotifier {
     final old = _tasks[index];
     final nextCategory = category ?? old.category;
     final categoryChanged = nextCategory != old.category;
+    final safeStep = step?.clamp(kMinStep, kMaxStep).toDouble();
 
     TaskCategory? nextPrevious = old.previousCategory;
     var clearPrevious = false;
@@ -103,6 +108,7 @@ class TaskController extends ChangeNotifier {
       title: cleanTitle,
       target: target,
       remaining: remaining.clamp(0.0, target).toDouble(),
+      step: safeStep,
       category: nextCategory,
       previousCategory: nextPrevious,
       clearPreviousCategory: clearPrevious,
