@@ -3,30 +3,42 @@ import '../data/task_model.dart';
 
 enum _TileMenuAction { edit, move, draftOrRestore, delete }
 
+/// A single task card.
+///
+/// Note: there is intentionally no horizontal swipe gesture on the tile any
+/// more, so horizontal swipes fall through to the category `TabBarView`.
+/// Deleting is done from the tile's menu (the page asks for confirmation).
 class TaskTile extends StatelessWidget {
   const TaskTile({
     super.key,
     required this.task,
+    required this.category,
+    required this.restoreCategory,
     required this.index,
     required this.onToggle,
     required this.onEdit,
     required this.onMove,
     required this.onDraftOrRestore,
-    required this.onConfirmDelete,
-    required this.onDeleteConfirmed,
+    required this.onDelete,
     required this.onIncrease,
     required this.onDecrease,
     this.reorderable = true,
   });
 
   final TaskModel task;
+
+  /// The category this task currently lives in (Draft for drafted tasks).
+  final TaskCategory category;
+
+  /// Where the task goes when restored from Draft.
+  final TaskCategory restoreCategory;
+
   final int index;
   final VoidCallback onToggle;
   final VoidCallback onEdit;
   final VoidCallback onMove;
   final VoidCallback onDraftOrRestore;
-  final Future<bool> Function() onConfirmDelete;
-  final VoidCallback onDeleteConfirmed;
+  final VoidCallback onDelete;
   final VoidCallback onIncrease;
   final VoidCallback onDecrease;
   final bool reorderable;
@@ -35,7 +47,7 @@ class TaskTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
-    final categoryColor = task.category.color;
+    final categoryColor = category.color;
     final accent = task.isCompleted && !task.isDraft
         ? const Color(0xFF16A34A)
         : categoryColor;
@@ -43,146 +55,135 @@ class TaskTile extends StatelessWidget {
     final doneAmount = formatAmount(task.target - task.remaining);
     final totalAmount = formatAmount(task.target);
     final subtitle = task.isDraft
-        ? 'Returns to: ${task.restoreCategory.label} · $doneAmount / $totalAmount'
+        ? 'Returns to: ${restoreCategory.label} · $doneAmount / $totalAmount'
         : task.isCompleted
             ? 'Completed'
             : '$doneAmount of $totalAmount done';
 
-    return Dismissible(
-      key: ValueKey('dismiss_${task.id}'),
-      direction: DismissDirection.endToStart,
-      confirmDismiss: (_) => onConfirmDelete(),
-      onDismissed: (_) => onDeleteConfirmed(),
-      background: const SizedBox.shrink(),
-      secondaryBackground: _DeleteSwipeBackground(
-        color: colorScheme.errorContainer,
-        foreground: colorScheme.onErrorContainer,
-      ),
-      child: Card(
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onEdit,
-          child: IntrinsicHeight(
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                // Colored left accent bar matching the task's category.
-                AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  width: 5,
-                  color: accent,
-                ),
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(4, 12, 8, 12),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Row(
-                          children: [
-                            if (reorderable)
-                              ReorderableDragStartListener(
-                                index: index,
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 4,
-                                    vertical: 10,
-                                  ),
-                                  child: Icon(
-                                    Icons.drag_indicator_rounded,
-                                    size: 20,
-                                    color: colorScheme.onSurfaceVariant
-                                        .withValues(alpha: 0.5),
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onEdit,
+        child: IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Colored left accent bar matching the task's category.
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                width: 5,
+                color: accent,
+              ),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(4, 12, 8, 12),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        children: [
+                          if (reorderable)
+                            ReorderableDragStartListener(
+                              index: index,
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 4,
+                                  vertical: 10,
+                                ),
+                                child: Icon(
+                                  Icons.drag_indicator_rounded,
+                                  size: 20,
+                                  color: colorScheme.onSurfaceVariant
+                                      .withValues(alpha: 0.5),
+                                ),
+                              ),
+                            )
+                          else
+                            const SizedBox(width: 8),
+                          _CheckButton(
+                            completed: task.isCompleted,
+                            color: accent,
+                            onTap: onToggle,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  task.title,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: theme.textTheme.titleMedium?.copyWith(
+                                    fontWeight: FontWeight.w700,
+                                    height: 1.25,
+                                    color: task.isCompleted
+                                        ? colorScheme.onSurfaceVariant
+                                        : colorScheme.onSurface,
+                                    decoration: task.isCompleted
+                                        ? TextDecoration.lineThrough
+                                        : null,
                                   ),
                                 ),
-                              )
-                            else
-                              const SizedBox(width: 8),
-                            _CheckButton(
-                              completed: task.isCompleted,
-                              color: accent,
-                              onTap: onToggle,
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    task.title,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: theme.textTheme.titleMedium?.copyWith(
-                                      fontWeight: FontWeight.w700,
-                                      height: 1.25,
-                                      color: task.isCompleted
-                                          ? colorScheme.onSurfaceVariant
-                                          : colorScheme.onSurface,
-                                      decoration: task.isCompleted
-                                          ? TextDecoration.lineThrough
-                                          : null,
-                                    ),
+                                const SizedBox(height: 3),
+                                Text(
+                                  subtitle,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    fontWeight: FontWeight.w500,
+                                    color: task.isCompleted && !task.isDraft
+                                        ? accent
+                                        : colorScheme.onSurfaceVariant,
                                   ),
-                                  const SizedBox(height: 3),
-                                  Text(
-                                    subtitle,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: theme.textTheme.bodySmall?.copyWith(
-                                      fontWeight: FontWeight.w500,
-                                      color: task.isCompleted && !task.isDraft
-                                          ? accent
-                                          : colorScheme.onSurfaceVariant,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(width: 6),
-                            _RemainingControl(
-                              task: task,
-                              accent: accent,
-                              onIncrease: onIncrease,
-                              onDecrease: onDecrease,
-                            ),
-                            _TaskMenuButton(
-                              task: task,
-                              onSelected: (action) async {
-                                switch (action) {
-                                  case _TileMenuAction.edit:
-                                    onEdit();
-                                  case _TileMenuAction.move:
-                                    onMove();
-                                  case _TileMenuAction.draftOrRestore:
-                                    onDraftOrRestore();
-                                  case _TileMenuAction.delete:
-                                    final confirmed = await onConfirmDelete();
-                                    if (confirmed) onDeleteConfirmed();
-                                }
-                              },
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 10),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(8),
-                            child: LinearProgressIndicator(
-                              minHeight: 5,
-                              value: task.progress,
-                              backgroundColor:
-                                  colorScheme.surfaceContainerHighest,
-                              valueColor: AlwaysStoppedAnimation<Color>(accent),
+                                ),
+                              ],
                             ),
                           ),
+                          const SizedBox(width: 6),
+                          _RemainingControl(
+                            task: task,
+                            accent: accent,
+                            onIncrease: onIncrease,
+                            onDecrease: onDecrease,
+                          ),
+                          _TaskMenuButton(
+                            task: task,
+                            restoreCategory: restoreCategory,
+                            onSelected: (action) {
+                              switch (action) {
+                                case _TileMenuAction.edit:
+                                  onEdit();
+                                case _TileMenuAction.move:
+                                  onMove();
+                                case _TileMenuAction.draftOrRestore:
+                                  onDraftOrRestore();
+                                case _TileMenuAction.delete:
+                                  onDelete();
+                              }
+                            },
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(8),
+                          child: LinearProgressIndicator(
+                            minHeight: 5,
+                            value: task.progress,
+                            backgroundColor:
+                                colorScheme.surfaceContainerHighest,
+                            valueColor: AlwaysStoppedAnimation<Color>(accent),
+                          ),
                         ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
         ),
       ),
@@ -193,10 +194,12 @@ class TaskTile extends StatelessWidget {
 class _TaskMenuButton extends StatelessWidget {
   const _TaskMenuButton({
     required this.task,
+    required this.restoreCategory,
     required this.onSelected,
   });
 
   final TaskModel task;
+  final TaskCategory restoreCategory;
   final ValueChanged<_TileMenuAction> onSelected;
 
   @override
@@ -238,7 +241,7 @@ class _TaskMenuButton extends StatelessWidget {
               Icon(
                 task.isDraft ? Icons.restore_rounded : Icons.drafts_outlined,
                 size: 20,
-                color: task.isDraft ? task.restoreCategory.color : null,
+                color: task.isDraft ? restoreCategory.color : null,
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -249,7 +252,7 @@ class _TaskMenuButton extends StatelessWidget {
                     Text(task.isDraft ? 'Restore' : 'Send to draft'),
                     if (task.isDraft)
                       Text(
-                        'Returns to: ${task.restoreCategory.label}',
+                        'Returns to: ${restoreCategory.label}',
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
                               color: colorScheme.onSurfaceVariant,
                             ),
@@ -279,42 +282,6 @@ class _TaskMenuButton extends StatelessWidget {
           ),
         ),
       ],
-    );
-  }
-}
-
-class _DeleteSwipeBackground extends StatelessWidget {
-  const _DeleteSwipeBackground({
-    required this.color,
-    required this.foreground,
-  });
-
-  final Color color;
-  final Color foreground;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      alignment: Alignment.centerRight,
-      padding: const EdgeInsets.symmetric(horizontal: 24),
-      decoration: BoxDecoration(
-        color: color,
-        borderRadius: BorderRadius.circular(18),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            'Delete',
-            style: TextStyle(
-              color: foreground,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const SizedBox(width: 8),
-          Icon(Icons.delete_outline_rounded, color: foreground),
-        ],
-      ),
     );
   }
 }
