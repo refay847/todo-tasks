@@ -97,9 +97,13 @@ class TaskController extends ChangeNotifier {
   // Loading
   // -----------------------------------------------------------------------
 
-  Future<void> load() async {
-    _isLoading = true;
-    notifyListeners();
+  /// [showLoading] is false for pull-to-refresh: showing the full-screen
+  /// spinner there would replace (and rebuild) the whole TabBarView.
+  Future<void> load({bool showLoading = true}) async {
+    if (showLoading) {
+      _isLoading = true;
+      notifyListeners();
+    }
 
     _categories = await _storage.loadCategories();
     _tasks = await _storage.loadTasks();

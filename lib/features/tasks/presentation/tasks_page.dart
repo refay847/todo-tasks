@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter/services.dart';
 import '../data/task_model.dart';
 import 'task_controller.dart';
@@ -18,6 +20,7 @@ class _TasksPageState extends State<TasksPage> with TickerProviderStateMixin {
   /// Recreated whenever the set / order of categories changes, because a
   /// TabController has a fixed length.
   late TabController _tabController;
+  final PageController _pageController = PageController();
   late List<String> _tabIds;
   late String _selectedId;
 
@@ -44,6 +47,7 @@ class _TasksPageState extends State<TasksPage> with TickerProviderStateMixin {
     _controller.removeListener(_onControllerChanged);
     _tabController.removeListener(_onTabChanged);
     _tabController.dispose();
+    _pageController.dispose();
     _controller.dispose();
     super.dispose();
   }
@@ -54,10 +58,57 @@ class _TasksPageState extends State<TasksPage> with TickerProviderStateMixin {
   }
 
   void _onTabChanged() {
-    if (_tabController.indexIsChanging) return;
+    // TabController notifies on every frame of a drag/animation. Rebuilding
+    // the whole page each time makes swiping janky, so only react when the
+    // selected category actually changes.
     final index = _tabController.index;
-    if (index < _tabIds.length) _selectedId = _tabIds[index];
+    if (index >= _tabIds.length) return;
+
+    // A tab was tapped (or animateTo was called): bring the pages along.
+    if (_tabController.indexIsChanging && _pageController.hasClients) {
+      final page = _pageController.page;
+      if (page == null || page.round() != index) {
+        _pageController.animateToPage(
+          index,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOutCubic,
+        );
+      }
+    }
+
+    final id = _tabIds[index];
+    if (id == _selectedId) return;
+    _selectedId = id;
     setState(() {});
+  }
+
+  /// Keeps the tab indicator following the pages while the user swipes.
+  /// (This is what TabBarView does internally; we do it ourselves so we can
+  /// use our own swipe physics.)
+  bool _onPageScroll(ScrollNotification notification) {
+    if (notification.depth != 0 || notification.metrics.axis != Axis.horizontal) {
+      return false;
+    }
+    if (_tabController.indexIsChanging || !_pageController.hasClients) {
+      return false;
+    }
+    final page = _pageController.page;
+    if (page == null) return false;
+
+    if (notification is ScrollUpdateNotification) {
+      if ((page - _tabController.index).abs() > 1.0) {
+        _tabController.index = page.round();
+      }
+      _tabController.offset =
+          (page - _tabController.index).clamp(-1.0, 1.0).toDouble();
+    } else if (notification is ScrollEndNotification) {
+      _tabController.index = page.round();
+      if (!_tabController.indexIsChanging) {
+        _tabController.offset =
+            (page - _tabController.index).clamp(-1.0, 1.0).toDouble();
+      }
+    }
+    return false;
   }
 
   /// Keeps the TabController's length in step with the category list and
@@ -78,8 +129,17 @@ class _TasksPageState extends State<TasksPage> with TickerProviderStateMixin {
     _tabIds = ids;
     _selectedId = ids[index];
 
-    // Dispose after the frame so the old TabBar/TabBarView detach cleanly.
-    WidgetsBinding.instance.addPostFrameCallback((_) => old.dispose());
+    // Dispose after the frame so the old TabBar detaches cleanly, and put the
+    // pages back on the selected category.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      old.dispose();
+      if (mounted && _pageController.hasClients) {
+        final page = _pageController.page;
+        if (page == null || page.round() != index || page != index.toDouble()) {
+          _pageController.jumpToPage(index);
+        }
+      }
+    });
     setState(() {});
   }
 
@@ -473,20 +533,31 @@ class _TasksPageState extends State<TasksPage> with TickerProviderStateMixin {
           // Horizontal swipes on the page move between categories.
           body: _controller.isLoading
               ? const Center(child: CircularProgressIndicator())
-              : TabBarView(
-                  controller: _tabController,
-                  children: [
-                    for (final category in tabs)
-                      _CategoryTaskList(
-                        key: ValueKey('list_${category.id}'),
-                        category: category,
-                        controller: _controller,
-                        onEdit: (task) => _openTaskSheet(task: task),
-                        onMove: _openMoveSheet,
-                        onDraftOrRestore: _handleDraftOrRestore,
-                        onDelete: _deleteTask,
-                      ),
-                  ],
+              : NotificationListener<ScrollNotification>(
+                  onNotification: _onPageScroll,
+                  child: PageView(
+                    controller: _pageController,
+                    // Our physics does the snapping (a tiny swipe is enough).
+                    pageSnapping: false,
+                    physics: const _SensitivePagePhysics(
+                      parent: ClampingScrollPhysics(),
+                    ),
+                    // Pre-builds the neighbouring pages so the first swipe
+                    // doesn't have to build a page while moving.
+                    allowImplicitScrolling: true,
+                    children: [
+                      for (final category in tabs)
+                        _CategoryTaskList(
+                          key: ValueKey('list_${category.id}'),
+                          category: category,
+                          controller: _controller,
+                          onEdit: (task) => _openTaskSheet(task: task),
+                          onMove: _openMoveSheet,
+                          onDraftOrRestore: _handleDraftOrRestore,
+                          onDelete: _deleteTask,
+                        ),
+                    ],
+                  ),
                 ),
           floatingActionButton: FloatingActionButton.extended(
             onPressed: () => _openTaskSheet(),
@@ -555,7 +626,7 @@ class _CategoryTab extends StatelessWidget {
   }
 }
 
-class _CategoryTaskList extends StatelessWidget {
+class _CategoryTaskList extends StatefulWidget {
   const _CategoryTaskList({
     super.key,
     required this.category,
@@ -573,6 +644,20 @@ class _CategoryTaskList extends StatelessWidget {
   final ValueChanged<TaskModel> onDraftOrRestore;
   final ValueChanged<TaskModel> onDelete;
 
+  @override
+  State<_CategoryTaskList> createState() => _CategoryTaskListState();
+}
+
+/// Kept alive so swiping between tabs never rebuilds a page from scratch
+/// (that was the main cause of jank), and it keeps its scroll position.
+class _CategoryTaskListState extends State<_CategoryTaskList>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  TaskCategory get category => widget.category;
+  TaskController get controller => widget.controller;
+
   Widget _buildTile(TaskModel task, int index, {required bool reorderable}) {
     return Padding(
       key: ValueKey('task_${task.id}'),
@@ -584,10 +669,10 @@ class _CategoryTaskList extends StatelessWidget {
         index: index,
         reorderable: reorderable,
         onToggle: () => controller.toggleTask(task.id),
-        onEdit: () => onEdit(task),
-        onMove: () => onMove(task),
-        onDraftOrRestore: () => onDraftOrRestore(task),
-        onDelete: () => onDelete(task),
+        onEdit: () => widget.onEdit(task),
+        onMove: () => widget.onMove(task),
+        onDraftOrRestore: () => widget.onDraftOrRestore(task),
+        onDelete: () => widget.onDelete(task),
         onIncrease: () =>
             controller.setRemaining(task.id, task.remaining + task.step),
         onDecrease: () =>
@@ -611,6 +696,16 @@ class _CategoryTaskList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // required by AutomaticKeepAliveClientMixin
+    // Listens to the controller itself, so the page stays up to date even
+    // though it is no longer rebuilt by the parent while swiping.
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) => _buildContent(context),
+    );
+  }
+
+  Widget _buildContent(BuildContext context) {
     final all = controller.tasksFor(category);
     final pending = controller.pendingTasksFor(category);
     final completed = controller.completedTasksFor(category);
@@ -620,7 +715,7 @@ class _CategoryTaskList extends StatelessWidget {
         // Keeps layout comfortable on tablets and wide screens.
         constraints: const BoxConstraints(maxWidth: 720),
         child: RefreshIndicator(
-          onRefresh: controller.load,
+          onRefresh: () => controller.load(showLoading: false),
           child: CustomScrollView(
             physics: const AlwaysScrollableScrollPhysics(),
             slivers: [
@@ -1695,4 +1790,81 @@ class _TaskFormSheetState extends State<_TaskFormSheet> {
       ),
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Swipe physics
+// ---------------------------------------------------------------------------
+
+/// Page-snapping physics where a *slight* swipe is enough to change page.
+///
+/// Flutter's default page physics only moves to the next page when you drag
+/// past 50% of the screen (or fling fast). Here the page changes as soon as
+/// the drag passes [switchThreshold] of the page width in the direction the
+/// finger was moving, and a quick flick always changes page.
+class _SensitivePagePhysics extends ScrollPhysics {
+  const _SensitivePagePhysics({super.parent});
+
+  /// Fraction of the page width the user must drag to switch page.
+  /// 0.05 = 5% (roughly a short nudge). Raise it if it switches too easily.
+  static const double switchThreshold = 0.05;
+
+  @override
+  _SensitivePagePhysics applyTo(ScrollPhysics? ancestor) {
+    return _SensitivePagePhysics(parent: buildParent(ancestor));
+  }
+
+  @override
+  Simulation? createBallisticSimulation(
+    ScrollMetrics position,
+    double velocity,
+  ) {
+    // Past either end: let the parent (clamping) physics deal with it.
+    if ((velocity <= 0.0 && position.pixels <= position.minScrollExtent) ||
+        (velocity >= 0.0 && position.pixels >= position.maxScrollExtent)) {
+      return super.createBallisticSimulation(position, velocity);
+    }
+
+    final tolerance = toleranceFor(position);
+    final viewport = position.viewportDimension;
+    final page = position.pixels / viewport;
+    final lower = page.floorToDouble();
+    final upper = page.ceilToDouble();
+    final fraction = page - lower;
+
+    final double targetPage;
+    if (velocity.abs() > tolerance.velocity) {
+      // A flick: go the way the finger flicked, however short the drag was.
+      targetPage = velocity > 0 ? upper : lower;
+    } else {
+      // A slow drag released: use the drag direction and the small threshold.
+      final direction = position is ScrollPosition
+          ? position.userScrollDirection
+          : ScrollDirection.idle;
+      switch (direction) {
+        case ScrollDirection.reverse: // moving towards the next page
+          targetPage = fraction > switchThreshold ? upper : lower;
+        case ScrollDirection.forward: // moving towards the previous page
+          targetPage = (1.0 - fraction) > switchThreshold ? lower : upper;
+        case ScrollDirection.idle:
+          targetPage = page.roundToDouble();
+      }
+    }
+
+    final target = (targetPage * viewport)
+        .clamp(position.minScrollExtent, position.maxScrollExtent)
+        .toDouble();
+
+    if ((target - position.pixels).abs() < tolerance.distance) return null;
+    return ScrollSpringSimulation(
+      spring,
+      position.pixels,
+      target,
+      velocity,
+      tolerance: tolerance,
+    );
+  }
+
+  @override
+  bool get allowImplicitScrolling => false;
 }
